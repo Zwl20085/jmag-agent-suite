@@ -58,6 +58,20 @@ ConstantTemperature, BrCorrection, MagnetizationCorrection, UseAnisotropicMagnet
 Magnet orientation patterns: Parallel, Radial, Circular, ParallelCircular, RadialCircular,
 PolarCircular, RadialSineCircular, ParallelSineCircular, ... (+ `outward`).
 
+## Custom materials (`jmag_create_material`, verified on 23.0)
+Two script views of one custom material: `lib.CreateCustomMaterial(name, folder)` returns a
+MaterialObject (`MagneticType`, `MagneticPermON_BH`, `Physical_MassDensity`, `Loss_*` ...);
+`lib.GetUserMaterial(name)` returns the Material-Editor view (scriptMaterialEditor page).
+Use the Material-Editor view for the magnetic definition:
+`MagneticPropertyType` 0 = MagneticSteel (1 = Magnet, 2 = MagnetizationMaterial),
+`MagneticSteelPermeabilityType` 2 = BHCurve, table `BhTable` = [[H A/m, B T], ...],
+`Density` plain value in g/cm^3 (use `SetValueWithUnit("Density", 7650, "kg/m^3")`),
+`ConductivityType` 0 + `Conductivity` [S/m]. Protected library steels report MaterialObject
+`MagneticType` 0 ("PermON_BH") and an empty B-H table; copying that flag makes a MAGNET with a
+B-H demagnetisation table (`IsMagnet()` True, solver: "Check the point array setting in
+material ..."). The iron-loss constants are written to the MaterialObject `Loss_Constant*`
+properties - their unit convention is not verified yet.
+
 ## Result tables (display name -> internal key)
 Torque, Circuit Current (LineCurrent), Circuit Voltage (TerminalVoltage), Coil Flux-Linkage
 (FEMCoilFlux), FEM Coil Inductance (FEMCoilInductance), Stored Energy (StoredEnergy), Joule Loss,

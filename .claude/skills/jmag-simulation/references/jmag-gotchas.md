@@ -25,6 +25,13 @@ them lets you interpret what you see.
 - Static2D/StaticAX/Static (3D) accept **no circuit**; FEM coils/conductors need Transient or
   Frequency studies. Static coil excitation = `Current` condition (Turn, Current, Direction2D).
 - 2D `ModelThickness` (stack length) defaults to **1 mm**.
+- A custom B-H material made through the MaterialObject flags is a **magnet** unless the
+  Material-Editor view says `MagneticPropertyType = 0`; the solver then aborts with "Check the
+  point array setting in material ...". `jmag_create_material` sets and verifies this.
+- An attached JMAG keeps the error flag of the previous session's failed call; `jmag_connect`
+  clears it (before the fix a clean connect reported that stale error as its own failure).
+- A closed shaft-bore loop in a DXF becomes its own region: name it (e.g. `Shaft`, Air) and
+  move it with the rotor instead of suppressing it.
 - Ground components ignore the requested name (always "Ground"); other components get an empty
   name if none is given.
 - Circuit terminals (grid units, rotation 0): two-terminal parts (x-2,y),(x+2,y); one-terminal

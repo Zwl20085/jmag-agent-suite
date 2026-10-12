@@ -458,6 +458,12 @@ def connect(ctx, pid=None, launch=True, visible=True):
     else:
         ctx.app.Hide()
     ctx._material_names = None
+    # An attached JMAG keeps the error flag and message log of whatever ran before (another
+    # session's failed op). dispatch() only baselines them for ops that start connected, so
+    # without this a clean connect would report that stale error as its own failure.
+    ctx.app.ClearError()
+    ctx.app.ClearWarning()
+    ctx._msg_count = len(ctx.app.GetAllMessages() or [])
     return app_info(ctx)
 
 
@@ -820,6 +826,66 @@ def set_material(ctx, study, parts, material, properties=None, orientation=None,
             row["orientation"] = _orient(ctx, mat, orientation)
         done.append(row)
     return {"assigned": done}
+
+
+#: Material-Editor flags of a non-linear soft-magnetic steel (``lib.GetUserMaterial(name)``,
+#: scriptMaterialEditor): MagneticPropertyType 0 = MagneticSteel (1 = Magnet!),
+#: MagneticSteelPermeabilityType 2 = BHCurve. Verified on 23.0: the MaterialObject flag
+#: "MagneticType" = 0 ("PermON_BH") that protected library steels report is a MAGNET with a B-H
+#: demagnetisation table (IsMagnet() True, the solver aborts with "Check the point array setting").
+MAGNETIC_STEEL = 0
+BH_CURVE = 2
+
+
+@op()
+def create_material(ctx, name, bh, density=None, conductivity=None, loss=None, overwrite=False,
+                    folder="Custom Materials"):
+    """Create a custom soft-magnetic material: B-H table (validated by the server), density,
+    conductivity, iron-loss formula constants. Every value is read back."""
+    app = ctx.need_app()
+    lib = app.GetMaterialLibrary()
+    if name in ctx.material_names():
+        if not overwrite:
+            raise OpError("material %r already exists" % name, "pass overwrite=true to replace it, or choose another name")
+        lib.DeleteCustomMaterial(name, folder)
+        app.ClearError()
+    m = need(lib.CreateCustomMaterial(name, folder), "custom material %r" % name)
+    um = need(lib.GetUserMaterial(name), "material-editor view of %r" % name)
+    um.SetValue("MagneticPropertyType", MAGNETIC_STEEL)
+    um.SetValue("MagneticSteelPermeabilityType", BH_CURVE)
+    um.SetTable("BhTable", [[float(h), float(b)] for h, b in bh])
+    ds = um.GetTable("BhTable")
+    back = [[ds.GetValue(i, 0), ds.GetValue(i, 1)] for i in range(ds.GetRows())]
+    if len(back) != len(bh) or any(abs(a[0] - float(b[0])) > 1e-9 * max(1.0, abs(b[0])) or
+                                   abs(a[1] - float(b[1])) > 1e-9 for a, b in zip(back, bh)):
+        raise OpError("B-H table read-back differs from the input (%d of %d rows)" % (len(back), len(bh)),
+                      "inspect with jmag_exec_python: lib.GetUserMaterial(name).GetTable('BhTable')")
+    flags = (um.GetValue("MagneticPropertyType"), um.GetValue("MagneticSteelPermeabilityType"))
+    if flags != (MAGNETIC_STEEL, BH_CURVE) or um.IsMagnet():
+        raise OpError("material %r is not a B-H steel after setup (MagneticPropertyType, "
+                      "MagneticSteelPermeabilityType) = %s, IsMagnet = %s" % (name, flags, um.IsMagnet()),
+                      "check the Material-Editor flags with jmag_exec_python")
+    report = {"name": m.GetName(), "magnetic_property": "MagneticSteel", "permeability": "BHCurve",
+              "is_magnet": False, "bh_rows": len(back), "bh_first": back[0], "bh_last": back[-1]}
+    if density is not None:
+        um.SetValueWithUnit("Density", float(density), "kg/m^3")    # plain SetValue is g/cm^3
+        report["density_kg_m3"] = um.GetValueWithUnit("Density", "kg/m^3")
+    if conductivity is not None:
+        um.SetValue("ConductivityType", 0)
+        um.SetValue("Conductivity", float(conductivity))
+        report["conductivity"] = um.GetValue("Conductivity")
+    if loss:
+        m.SetValue("Loss_Type", 1)
+        for key, prop in (("Kh", "Kh"), ("Ke", "Ke"), ("alpha", "Alpha"), ("beta", "Beta")):
+            m.SetValue("Loss_Type" + prop, 1)
+            m.SetValue("Loss_Constant" + prop, float(loss[key]))
+        report["loss"] = {k: m.GetValue("Loss_Constant" + p) for k, p in
+                          (("Kh", "Kh"), ("Ke", "Ke"), ("alpha", "Alpha"), ("beta", "Beta"))}
+    ctx._material_names = None
+    if name not in ctx.material_names():
+        raise OpError("material %r was created but is not listed in the library" % name,
+                      "check the folder %r in JMAG's material library" % folder)
+    return report
 
 
 def _orient(ctx, mat, o):
@@ -1437,6 +1503,9 @@ def model_image(ctx, path, width=1400, height=1000, show_mesh=False):
     app = ctx.need_app()
     v = app.View()
     v.SetContourView(False)
+    # before any result exists JMAG logs "The contour is not available to show" for the call above
+    # although the view is fine; clear it so a valid image is not reported as a failure
+    app.ClearError()
     if show_mesh:
         v.ShowMesh()
     else:

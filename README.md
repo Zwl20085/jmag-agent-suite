@@ -11,7 +11,7 @@ with engineering feedback at every step.
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB)
 ![JMAG](https://img.shields.io/badge/JMAG--Designer-23.x-0b6e99)
 ![Platform](https://img.shields.io/badge/platform-Windows-0078D6)
-![Tools](https://img.shields.io/badge/MCP%20tools-54-6f42c1)
+![Tools](https://img.shields.io/badge/MCP%20tools-55-6f42c1)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 <img src="docs/images/spm_flux_density.png" width="560" alt="Flux density of a 12-slot 4-pole SPM motor solved by an agent through the bridge">
@@ -53,7 +53,7 @@ flowchart LR
 | Session | `status` `connect` `quit` `dialogs` `screenshot` `cleanup` |
 | Project & geometry | `new_project` `open_project` `save_project` `summary` `import_dxf` `import_cad` `list_parts` `rename_parts` `suppress_parts` `model_image` |
 | Study setup | `create_study` `duplicate_study` `delete_study` `get_properties` `set_properties` `set_step` `set_equations` `get_equations` |
-| Materials | `find_materials` `set_material` (incl. magnet orientation) |
+| Materials | `find_materials` `create_material` (custom B-H steel) `set_material` (incl. magnet orientation) |
 | Excitation & conditions | `add_current` `add_fem_coil` `add_fem_conductor` `add_condition` `list_conditions` `delete_condition` |
 | Circuits | `circuit_quick` (calibrated 1-phase and 3-phase layouts) `circuit_add` `circuit_summary` `circuit_image` |
 | Mesh | `mesh` `mesh_size` (+ slide-mesh settings through `set_properties`) |
