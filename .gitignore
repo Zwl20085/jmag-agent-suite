@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+build/
+dist/
+
+# JMAG projects and solver output (licensed/confidential data never goes to a public repo)
+*.jproj
+*.jfiles/
+*.jplot
+*.jcf
+*.jmdl
+*.sav
+*.jlog
+**/out/
+replay*.py
+!src/jmag_bridge/replay.py
+
+# Local tooling
+.claude/settings.local.json
+*.log
