@@ -1476,6 +1476,7 @@ def contour_image(ctx, study, path, result_type="MagneticFluxDensity", component
         cd.SetComponent(component)
     s.SetCurrentContour(name)
     v = app.View()
+    v.ShowModel()          # a previous mesh view (model_image show_mesh) would draw every element edge
     v.SetContourView(True)
     rt = s.GetResultTable()
     solved = rt.GetData(0).GetRows() if rt.NumTables() else 1  # an aborted run has fewer steps than requested
@@ -1514,6 +1515,8 @@ def model_image(ctx, path, width=1400, height=1000, show_mesh=False):
     path = os.path.abspath(path)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     app.ExportImageWithSize(path, int(width), int(height))
+    if show_mesh:
+        v.ShowModel()      # leave the view as found: later contour images must not carry the mesh
     return {"path": path}
 
 

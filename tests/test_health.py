@@ -172,3 +172,12 @@ def test_known_messages_are_classified():
     assert [x["level"] for x in f] == ["info", "info", "warning"]
     assert health.summarize(f)["verdict"] == "CHECK"
     assert health.summarize(f[:2])["verdict"] == "PASS"
+
+
+def test_harmonics_of_a_dc_dominant_signal_has_no_thd():
+    # torque-like signal: DC + small ripple -> harmonics() omits thd_pct, callers must use .get()
+    import math as _m
+    from jmag_bridge import health as _h
+    y = [5.0 + 0.5 * _m.sin(2 * _m.pi * 6 * i / 72) for i in range(72)]
+    out = _h.harmonics(y)
+    assert "thd_pct" not in out and out["dc"] > 4.9

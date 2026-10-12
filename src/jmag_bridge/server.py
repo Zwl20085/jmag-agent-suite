@@ -780,7 +780,8 @@ async def jmag_get_result(study: str, table: str, columns: list[str] | None = No
             px, py = health.last_period(x, ys, 1.0 / electrical_frequency_hz)
             h = health.harmonics(py)
             if h:
-                s["last_period"] = {"mean": sum(py) / len(py), "fundamental": h["fundamental"], "thd_pct": h["thd_pct"],
+                s["last_period"] = {"mean": sum(py) / len(py), "fundamental": h["fundamental"],
+                                    "thd_pct": h.get("thd_pct"),  # None for DC-dominant tables (torque): harmonics() omits it
                                     "harmonic_amplitudes": [float(f"{a:.4g}") for a in h["amplitudes"][:10]]}
             p = health.periodicity(x, ys, 1.0 / electrical_frequency_hz)
             if p:

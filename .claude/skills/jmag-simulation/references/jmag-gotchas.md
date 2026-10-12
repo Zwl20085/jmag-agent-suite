@@ -30,6 +30,12 @@ them lets you interpret what you see.
   point array setting in material ...". `jmag_create_material` sets and verifies this.
 - An attached JMAG keeps the error flag of the previous session's failed call; `jmag_connect`
   clears it (before the fix a clean connect reported that stale error as its own failure).
+- A FEM coil's `Turn` is spread over all regions of one coil side: with k regions in the "up"
+  side each region carries Turn*I/k. For k series tooth coils of N turns use Turn = k*N.
+- The slide mesh needs `AutoDivision = 0` (and `AutoGapDivision = 0`) for your
+  `CircumferentialDivision` to be used; otherwise JMAG picks its own and rewrites the step control.
+- `View.ShowMesh()` persists: a later contour export draws every element edge unless the view is
+  reset with `ShowModel()` (the bridge does both now).
 - A closed shaft-bore loop in a DXF becomes its own region: name it (e.g. `Shaft`, Air) and
   move it with the rotor instead of suppressing it.
 - Ground components ignore the requested name (always "Ground"); other components get an empty
