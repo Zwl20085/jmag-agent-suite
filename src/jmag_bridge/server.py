@@ -22,7 +22,7 @@ try:  # MCP Python SDK v2
 except ImportError:  # SDK v1
     from mcp.server.fastmcp import FastMCP as _Server, Image  # type: ignore
 
-from . import health, solver_monitor, winui
+from . import health, materials, solver_monitor, winui
 from .config import find_jmag, load_state, save_state, state_dir
 from .docs_index import DocsIndex
 from .worker_client import Worker, WorkerError
@@ -373,6 +373,33 @@ async def jmag_get_equations(study: str, model: str | None = None) -> dict:
 async def jmag_find_materials(query: str = "", limit: int = 40) -> dict:
     """Search JMAG's material library, e.g. '35JN', 'N42', 'Copper', 'Air', 'SUS'."""
     return await run_op("find_materials", 180, query=query, limit=limit)
+
+
+@mcp.tool()
+async def jmag_create_material(name: str, bh: list, density: float | None = None, conductivity: float | None = None,
+                               loss: dict | None = None, overwrite: bool = False) -> dict:
+    """Create a custom soft-magnetic material (e.g. a measured or temperature-scaled lamination) in JMAG's
+    'Custom Materials' library, then assign it with jmag_set_material like any library grade.
+
+    bh: [[H (A/m), B (T)], ...] strictly increasing in both; (0, 0) is prepended if missing. Extend it to
+        >= 1e5 A/m - JMAG continues the last point with slope mu0, so a short table under-saturates.
+    density: kg/m3. conductivity: S/m (0 for a laminated core with EddyCurrentCalculation off).
+    loss: iron-loss formula {"Kh", "Ke", "alpha", "beta"} (W/kg = Kh f B^alpha + Ke f^2 B^beta; beta defaults
+        to 2). JMAG's unit convention for these constants is not verified by the bridge yet - cross-check a
+        loss result against a hand calculation before relying on it.
+    overwrite: replace an existing custom material of that name.
+    Every value is read back; the response repeats the stored table ends and any validation warnings.
+    """
+    try:
+        chk = materials.check_bh_table(bh)
+        loss_v = materials.check_loss(loss)
+    except materials.MaterialInputError as e:
+        return {"ok": False, "error": {"message": str(e), "hint": e.hint}}
+    out = await run_op("create_material", 120, name=name, bh=chk["table"], density=density, conductivity=conductivity,
+                       loss=loss_v, overwrite=overwrite)
+    if chk["warnings"]:
+        out.setdefault("warnings", []).extend(chk["warnings"])
+    return out
 
 
 @mcp.tool()
@@ -753,7 +780,8 @@ async def jmag_get_result(study: str, table: str, columns: list[str] | None = No
             px, py = health.last_period(x, ys, 1.0 / electrical_frequency_hz)
             h = health.harmonics(py)
             if h:
-                s["last_period"] = {"mean": sum(py) / len(py), "fundamental": h["fundamental"], "thd_pct": h["thd_pct"],
+                s["last_period"] = {"mean": sum(py) / len(py), "fundamental": h["fundamental"],
+                                    "thd_pct": h.get("thd_pct"),  # None for DC-dominant tables (torque): harmonics() omits it
                                     "harmonic_amplitudes": [float(f"{a:.4g}") for a in h["amplitudes"][:10]]}
             p = health.periodicity(x, ys, 1.0 / electrical_frequency_hz)
             if p:
