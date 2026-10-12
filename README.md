@@ -104,7 +104,7 @@ Every tool returns `{"ok", "result", "error": {"message", "hint"}, "jmag_message
 **Requirements:** Windows, a licensed JMAG-Designer 23.x, Python ≥ 3.10, and Claude Code (or any MCP client).
 
 ```powershell
-git clone https://github.com/<you>/jmag-mcp-bridge
+git clone https://github.com/Zwl20085/jmag-mcp-bridge
 cd jmag-mcp-bridge
 .\scripts\install.ps1                      # venv + package, registers MCP server "jmag", installs the skills
 # JMAG somewhere unusual?  .\scripts\install.ps1 -JmagHome "E:\JMAG-Designer23.1"
