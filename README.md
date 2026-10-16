@@ -113,9 +113,10 @@ API but not yet exercised on a real licence. **Recipe** = the skill walks the ag
 | Transient with circuit and motion | Verified | Recipe | Recipe | Verified | Recipe |
 | Setup lint, solver monitor, cancel | Verified | Verified | Verified | Verified | Verified |
 | Physics invariants (KVL, energy, power balance) | Verified | Verified | Verified | Verified | Verified |
-| Cogging, back-EMF, load point, inductance | Tool | Tool | Recipe | Recipe | Recipe |
+| Cogging, back-EMF, load point, Ld/Lq (`jmag_experiment`) | Verified | Recipe | Recipe | Recipe | Recipe |
 | Iron-loss study and loss tables | Verified | Tool | Tool | Tool | Tool |
 | Efficiency map | Tool | Tool | Script | n/a | n/a |
+| JMAG case report, table exporters | Verified | Verified | Verified | Verified | Verified |
 | Design table, case sweeps | Verified | Verified | Verified | Verified | Verified |
 | Optimisation table | Tool | Tool | Tool | Tool | Tool |
 | Plots, comparison, report | Verified | Verified | Verified | Verified | Verified |
@@ -150,8 +151,12 @@ The bridge checks at seven levels, cheapest first. The agent is taught to climb 
 | 12s/4p SPM, 1500 rpm, 10 A | torque vs. `3/2·p·ψ₁·I` | 1.774 vs. 1.777 Nm (0.2 %) |
 | | electromechanical power balance | 0.12 % |
 | | steady state (last two periods) | 0.09 % |
-| 12s/4p SPM | iron-loss study from the transient, loss per part | created, solved and read through `jmag_loss_study` |
-| 12s/4p SPM | design table with 2 cases, solved with `jmag_run_cases` | per-case results readable with `case=` |
+| 12s/4p SPM, `jmag_experiment` | back-EMF at 1500 rpm | 13.0 V rms per phase, phases 120° apart, `E = ωψ` consistent |
+| | cogging torque | 6.06 Nm peak-to-peak, dominant order 12 per revolution (= LCM(12, 4)) |
+| | Ld / Lq from three static solves | 0.367 / 0.366 mH (equal, as an SPM should be) |
+| | load point power balance | 0.9 % |
+| 12s/4p SPM, `jmag_loss_study` | iron-loss study from the transient | stator hysteresis 1.998 W + eddy 2.047 W = 4.045 W total |
+| 12s/4p SPM, `jmag_run_cases` | design table, 2 cases (10 A, 5 A) | 1.804 / 0.910 Nm, ratio 0.504, per-case results via `case=` |
 
 ## Tools by task
 
@@ -258,7 +263,10 @@ skills that encode how an engineer judges a result.
 - Tools marked unverified in their docstrings (efficiency map, optimisation table, JMAG winding definitions) were
   implemented from the API reference and read back every value they set, but have not been run on a licence that
   exercises them. Reports from other installations are welcome.
-- Thermal and NVH studies are not scriptable study types in the 23.0 API; the losses skill documents the export route.
+- Thermal study types exist on a full licence (`jmag_capabilities` lists them) but there is no thermal workflow in the
+  bridge yet; NVH force export is a JMAG-provided script. The losses skill documents the export route for both.
+- Two API calls crashed Designer 23.0 in live tests (JMAG winding definitions, field value exports). The bridge refuses
+  them unless `force=true`.
 - JMAG is commercial software. This project contains none of its code or documentation. Not affiliated with JSOL
   Corporation. JMAG is a trademark of JSOL Corporation.
 
