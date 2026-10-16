@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "jmag-mcp-bridge"
-version = "0.1.0"
-description = "MCP server + Claude skills that let AI agents drive JMAG-Designer FEA with engineering feedback"
+name = "jmag-agent-suite"
+version = "0.2.0"
+description = "All-in-one JMAG-Designer agent toolkit: MCP server, physics checks and Claude skills for electromagnetic FEA"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
@@ -19,6 +19,11 @@ classifiers = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]
+
+[project.urls]
+Homepage = "https://github.com/Zwl20085/jmag-agent-suite"
+Repository = "https://github.com/Zwl20085/jmag-agent-suite"
+Issues = "https://github.com/Zwl20085/jmag-agent-suite/issues"
 
 [project.scripts]
 jmag-mcp = "jmag_bridge.server:main"

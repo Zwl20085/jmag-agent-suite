@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Install jmag-mcp-bridge for Claude Code: venv + package, MCP registration, skills.
+  Install jmag-agent-suite for Claude Code: venv + package, MCP registration, skills.
 .EXAMPLE
   .\scripts\install.ps1                       # user-wide MCP server + skills
   .\scripts\install.ps1 -JmagHome "E:\JMAG-Designer23.1"

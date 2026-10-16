@@ -22,3 +22,10 @@ replay*.py
 # Local tooling
 .claude/settings.local.json
 *.log
+
+# Claude Code local state
+.claude/worktrees/
+.mcp.local.json
+.env
+.env.*
+scratch/

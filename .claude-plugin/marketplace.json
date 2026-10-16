@@ -1,0 +1,12 @@
+{
+  "name": "jmag-agent-suite",
+  "description": "JMAG-Designer agent toolkit for Claude Code",
+  "owner": { "name": "Zwl20085" },
+  "plugins": [
+    {
+      "name": "jmag",
+      "source": "./",
+      "description": "MCP server, physics health checks and skills that let Claude drive JMAG-Designer FEA."
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "jmag": {
+      "command": "uvx",
+      "args": ["--from", "${CLAUDE_PLUGIN_ROOT}", "jmag-mcp"],
+      "env": { "JMAG_HOME": "${user_config.JMAG_HOME}" }
+    }
+  }
+}

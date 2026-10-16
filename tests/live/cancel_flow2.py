@@ -20,7 +20,7 @@ async def main(project, study):
             await call("jmag_open_project", {"path": project}, 300)
             await call("jmag_set_step", {"study": study, "steps": 20001, "time_step": 0.0005}, 200)
             await call("jmag_run", {"study": study, "wait_seconds": 6, "check_first": False}, 400)
-            await call("jmag_cancel_run", {"keep_partial_results": True})
+            await call("jmag_cancel_run", {})
             await call("jmag_run_status", {}, 1200)
             await call("jmag_dialogs", {}, 400)
             await call("jmag_summary", {}, 600)

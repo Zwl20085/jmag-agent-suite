@@ -16,6 +16,16 @@ from typing import Iterable, Sequence
 
 COIL_CONDITIONS = ("Current", "FEMCoil")
 
+# Single source of truth for the numeric limits used by the checks (and quoted in the docs).
+# These are FAIL limits; healthy runs are usually far inside them (see README feedback ladder).
+THRESHOLDS = {
+    "kvl_rel": 1e-3,            # max |R i + dpsi/dt - v| / max|v|
+    "energy_rel": 0.05,         # |1/2 sum(i psi) - W| / W   (linear-circuit identity)
+    "power_balance_rel": 0.05,  # |<sum i dpsi/dt> - <T> omega| / max of the two
+    "steady_rel": 0.02,         # last two periods differ by less than this
+    "min_steps_per_period": 20,
+}
+
 
 def _f(level: str, code: str, message: str, fix: str = "") -> dict:
     d = {"level": level, "code": code, "message": message}
@@ -133,7 +143,7 @@ def preflight(facts: dict, electrical_frequency_hz: float | None = None) -> list
         dt = step.get("TimeStep") if step.get("StepType") == 0 else None
         if electrical_frequency_hz and dt:
             spp = 1.0 / (float(electrical_frequency_hz) * float(dt))
-            if spp < 20:
+            if spp < THRESHOLDS["min_steps_per_period"]:
                 out.append(_f("warning", "COARSE_TIME_STEP",
                               f"only {spp:.1f} steps per electrical period", "use >= 30-60 steps/period for EMF and torque"))
             span = float(dt) * (int(n) - 1) * float(electrical_frequency_hz) if n else 0
@@ -220,7 +230,7 @@ def periodicity(x: Sequence[float], y: Sequence[float], period: float) -> dict |
     a, b = y[-m:], y[-2 * m:-m]
     scale = max(max(abs(v) for v in a), 1e-15)
     diff = max(abs(p - q) for p, q in zip(a, b)) / scale
-    return {"max_rel_diff_last_two_periods": diff, "steady": diff < 0.02}
+    return {"max_rel_diff_last_two_periods": diff, "steady": diff < THRESHOLDS["steady_rel"]}
 
 
 # --------------------------------------------------------------------------- physics invariants
@@ -234,7 +244,7 @@ def kvl_residual(t: Sequence[float], i: Sequence[float], v: Sequence[float], psi
     res = [abs(resistance * i[k] + (psi[k] - psi[k - 1]) / (t[k] - t[k - 1]) - v[k]) for k in range(1, len(t))]
     vmax = max((abs(x) for x in v), default=0.0) or 1e-15
     rel = max(res) / vmax if res else None
-    return {"max_abs_residual_V": max(res) if res else None, "max_rel_residual": rel, "ok": rel is not None and rel < 1e-3}
+    return {"max_abs_residual_V": max(res) if res else None, "max_rel_residual": rel, "ok": rel is not None and rel < THRESHOLDS["kvl_rel"]}
 
 
 def inductance_consistency(flux_linkages: Sequence[float], currents: Sequence[float], energy: float) -> dict:
@@ -242,7 +252,7 @@ def inductance_consistency(flux_linkages: Sequence[float], currents: Sequence[fl
     w_flux = 0.5 * sum(i * p for i, p in zip(currents, flux_linkages))
     rel = abs(w_flux - energy) / max(abs(energy), 1e-15)
     return {"energy_from_fields_J": energy, "energy_from_flux_J": w_flux, "rel_diff": rel,
-            "ok": rel < 0.05}
+            "ok": rel < THRESHOLDS["energy_rel"]}
 
 
 def power_balance(t: Sequence[float], currents: dict, fluxes: dict, torque: Sequence[float], speed_rpm: float,
@@ -272,7 +282,7 @@ def power_balance(t: Sequence[float], currents: dict, fluxes: dict, torque: Sequ
     ref = max(abs(p_e), abs(p_mech), 1e-12)
     rel = abs(p_e - p_mech) / ref
     return {"mean_torque_Nm": t_mean, "mechanical_power_W": p_mech, "electromagnetic_power_W": p_e,
-            "rel_diff": rel, "ok": rel < 0.05, "samples": m,
+            "rel_diff": rel, "ok": rel < THRESHOLDS["power_balance_rel"], "samples": m,
             "note": "difference = eddy-current losses in conducting parts + discretisation; sign: + = motoring"}
 
 
@@ -322,7 +332,7 @@ def postflight(run_info: dict, convergence: dict | None = None, tables: dict | N
                       "check solver errors below, jmag_dialogs, and the run log"))
     for e in run_info.get("errors", []):
         level, code, why = classify_message(e, "error")
-        out.append(_f("error", code, " ".join(e.split())[:500], why))
+        out.append(_f(level, code, " ".join(e.split())[:500], why))
     for w in run_info.get("warnings", []):
         level, code, why = classify_message(w, "warning")
         out.append(_f(level, code, " ".join(w.split())[:300], why))
@@ -337,8 +347,17 @@ def postflight(run_info: dict, convergence: dict | None = None, tables: dict | N
         if title.lower().startswith(("circuit current", "line current")) and cols:
             # a balanced 3-phase source column is legitimately zero, so only flag an all-zero table
             if all(ys and max(abs(v) for v in ys) == 0.0 for ys in cols.values()):
-                out.append(_f("error", "ZERO_CURRENT", f"{title}: every circuit current is identically zero",
-                              "source not connected, wrong wiring, or zero amplitude"))
+                # Same intent as preflight: zero sources are a legitimate cogging / open-circuit run, so only
+                # a warning, unless the flux-linkage tables are all zero too (then nothing is excited at all).
+                flux_tables = [tb2.get("columns", {}) for t2, tb2 in (tables or {}).items()
+                               if "flux" in t2.lower() and tb2.get("columns")]
+                flux_zero = bool(flux_tables) and all(
+                    all(ys2 and max(abs(v) for v in ys2) == 0.0 for ys2 in c2.values()) for c2 in flux_tables)
+                out.append(_f("error" if flux_zero else "warning", "ZERO_CURRENT",
+                              f"{title}: every circuit current is identically zero"
+                              + (" and so is the flux linkage" if flux_zero else ""),
+                              "source not connected, wrong wiring or zero amplitude; "
+                              "expected for cogging-torque / open-circuit runs"))
         for col, ys in cols.items():
             if not finite(ys):
                 out.append(_f("error", "NON_FINITE", f"{title} / {col} contains NaN or Inf"))

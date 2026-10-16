@@ -17,3 +17,18 @@ jobs:
         run: |
           pip install vermin
           vermin --target=3.8- --violations --no-tips src/jmag_bridge/worker
+  worker-py38:
+    # The worker runs under JMAG's bundled Python 3.8: exercise the real worker protocol on 3.8.
+    # Only the package modules the worker tests import are needed, so no install (requires-python is >=3.10)
+    # and no `mcp` dependency: use PYTHONPATH=src.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.8"
+      - run: python -m pip install pytest
+      - name: worker protocol tests on Python 3.8
+        env:
+          PYTHONPATH: src
+        run: python -m pytest tests/test_offline.py -q -k worker -p no:cacheprovider

@@ -1,0 +1,20 @@
+{
+  "name": "jmag",
+  "displayName": "JMAG Agent Suite",
+  "description": "Drive JMAG-Designer from Claude: MCP server, physics health checks and skills for electromagnetic FEA of electric machines.",
+  "version": "0.2.0",
+  "author": { "name": "Zwl20085" },
+  "homepage": "https://github.com/Zwl20085/jmag-agent-suite",
+  "repository": "https://github.com/Zwl20085/jmag-agent-suite",
+  "license": "MIT",
+  "keywords": ["jmag", "fea", "electric-machines", "mcp", "simulation"],
+  "skills": "./.claude/skills",
+  "userConfig": {
+    "JMAG_HOME": {
+      "type": "directory",
+      "title": "JMAG-Designer install folder",
+      "description": "Folder of JMAG-Designer (e.g. C:/Program Files/JMAG-Designer23.1). Leave empty to auto-detect.",
+      "required": false
+    }
+  }
+}
