@@ -4,15 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-An MCP server (`jmag_bridge`) plus Claude skills (`.claude/skills/`) that let an agent drive
-JMAG-Designer (commercial electromagnetic FEA, Windows) and judge whether a simulation is
-behaving normally. Target: JMAG-Designer 23.x. The skills are the operating manual for *using*
-the tools; this file is for *changing* the code.
+JMAG Agent Suite (repo `jmag-agent-suite`, Python package `jmag_bridge`, MCP server `jmag`): an MCP
+server plus a family of Claude skills (`.claude/skills/`) that let an agent drive JMAG-Designer
+(commercial electromagnetic FEA, Windows) and judge whether a simulation is behaving normally.
+Target: JMAG-Designer 23.x. The skills are the operating manual for *using* the tools; this
+file is for *changing* the code. Measured JMAG behaviour lives in `docs/jmag-facts.md`.
 
 ## Commands
 
 ```powershell
-python -m venv .venv; .venv\Scripts\pip install -e ".[dev]"   # dev install (Python >= 3.10)
+python -m venv .venv; .venv\Scripts\pip install -e ".[dev,plots]"   # dev install (Python >= 3.10)
 .venv\Scripts\python -m pytest                                 # offline tests (no JMAG needed)
 .venv\Scripts\python -m pytest tests/test_health.py::test_power_balance_ideal_pm_machine   # one test
 .venv\Scripts\python -m jmag_bridge                           # run the MCP server (stdio)
@@ -37,6 +38,9 @@ MCP client --stdio--> server.py (Python >=3.10, MCP SDK)
                         |-- worker_client.Worker "runner" (one per jmag_run)   (JMAG's python3.8)
                         |                                                   --ProcessLink--> designer.exe
                         |-- health.py         pure rules + physics invariants (unit-tested)
+                        |-- experiments.py    server-side orchestration of standard tests over ops
+                        |-- estimate.py / winding.py / units.py   analytic layer (pure, unit-tested)
+                        |-- plotting.py / reporting.py / compare.py   post-processing (pure)
                         |-- solver_monitor.py  reads jmonitor/jcgmntr/Designer.log, kills ExecSolver
                         |-- winui.py + ps/*.ps1  UI Automation: dialogs, clicks, window screenshots
                         |-- launcher.py        starts designer.exe detached (WMI) so it outlives the session
@@ -74,8 +78,13 @@ Hard constraints behind this split:
 2. Expose it in `server.py` with a docstring written for an LLM caller (units, examples, pitfalls);
    add it to `READ_ONLY_OPS` if it doesn't change state.
 3. If it adds a rule or invariant, put the logic in `health.py` and test it in `tests/test_health.py`.
-4. Document verified property names/behaviour in `.claude/skills/jmag-simulation/references/`.
-   Only write down behaviour you observed on a real JMAG; mark anything else as unverified.
+4. Document verified property names/behaviour in `.claude/skills/jmag-simulation/references/`
+   (advanced API: `references/advanced-api.md`) and mention the tool in
+   `.claude/skills/jmag/references/tool-map.md`. Only write down behaviour you observed on a real
+   JMAG; mark anything else as unverified, in the docstring too.
+5. `tests/test_tool_names.py` fails if README or any skill names a tool that is not registered.
+   Pure logic (metrics, estimates, diffs) goes in its own module with tests; server-side
+   orchestration (`experiments.py`) composes ops and never talks to JMAG directly.
 
 ## Facts that are easy to get wrong
 
