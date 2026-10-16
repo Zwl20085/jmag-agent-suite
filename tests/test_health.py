@@ -219,7 +219,7 @@ def test_readme_numbers_match_thresholds():
     import re
     from pathlib import Path
     readme = (Path(__file__).resolve().parent.parent / "README.md").read_text(encoding="utf-8")
-    row = next((ln for ln in readme.splitlines() if "Physics invariants" in ln), None)
+    row = next((ln for ln in readme.splitlines() if "**Physics invariants**" in ln), None)
     assert row, "README has no 'Physics invariants' row in the feedback ladder"
     cell = [c.strip() for c in row.strip().strip("|").split("|")][-1]
     nums = [float(m) for m in re.findall(r"(\d+(?:\.\d+)?(?:e-?\d+)?)\s*%", cell)]
