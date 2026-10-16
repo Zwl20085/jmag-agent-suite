@@ -7,7 +7,7 @@ from pathlib import Path
 from .config import JmagInstall
 
 HEADER = '''# -*- coding: utf-8 -*-
-r"""Replay of a jmag-mcp-bridge session ({n} operations).
+r"""Replay of a JMAG Agent Suite session ({n} operations).
 
 Run with JMAG's bundled interpreter:
     "{python}" "{this}" [--pid <running JMAG pid>]

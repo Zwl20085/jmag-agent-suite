@@ -12,7 +12,7 @@ from typing import Sequence
 
 from . import health
 
-INSTALL_HINT = 'pip install "jmag-mcp-bridge[plots]"  (installs matplotlib into the bridge\'s Python)'
+INSTALL_HINT = 'pip install "jmag-agent-suite[plots]"  (installs matplotlib into the bridge\'s Python)'
 
 
 class PlottingUnavailable(ImportError):

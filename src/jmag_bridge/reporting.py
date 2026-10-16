@@ -160,7 +160,7 @@ def build_report(out_dir: str, title: str, studies: list[dict], notes: str | lis
     open_doubts = list(doubts or [])
     sections = [_study_section(s, img_dir, include_images, open_doubts) for s in studies]
     verdicts = {s.get("name", "?"): verdict_of(s) for s in studies}
-    md = [f"# {title}\n", f"Generated {time.strftime('%Y-%m-%d %H:%M')} by jmag-mcp-bridge.\n",
+    md = [f"# {title}\n", f"Generated {time.strftime('%Y-%m-%d %H:%M')} by JMAG Agent Suite.\n",
           "## Verdict overview\n", table(["study", "verdict"], [[k, v] for k, v in verdicts.items()])]
     if not studies:
         open_doubts.append("the report covers no studies")

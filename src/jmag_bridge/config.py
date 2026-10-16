@@ -64,8 +64,13 @@ def find_jmag(explicit: str | None = None) -> JmagInstall | None:
 
 
 def state_dir() -> Path:
-    base = os.environ.get("JMAG_BRIDGE_HOME") or os.path.join(
-        os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "jmag-mcp-bridge")
+    """State folder: JMAG_BRIDGE_HOME, else %LOCALAPPDATA%/jmag-agent-suite (an existing
+    jmag-mcp-bridge folder from older installs keeps being used, so journals and docs indexes survive)."""
+    root = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    base = os.environ.get("JMAG_BRIDGE_HOME")
+    if not base:
+        legacy = os.path.join(root, "jmag-mcp-bridge")
+        base = legacy if os.path.isdir(legacy) else os.path.join(root, "jmag-agent-suite")
     p = Path(base)
     p.mkdir(parents=True, exist_ok=True)
     return p

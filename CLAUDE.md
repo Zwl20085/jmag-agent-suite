@@ -65,7 +65,7 @@ Hard constraints behind this split:
   (read-back + close-match suggestions for unknown names). Keep that pattern for new ops.
 - Ops are registered with `@op(read_only=...)`; the server keeps its own `READ_ONLY_OPS` set
   (calls allowed while a solve runs) and journals every non-read-only call to
-  `%LOCALAPPDATA%/jmag-mcp-bridge/journal.jsonl` (`replay.py` turns it into a script).
+  `%LOCALAPPDATA%/jmag-agent-suite/journal.jsonl` (`replay.py` turns it into a script).
 - **Runs** happen in a separate "runner" worker attached to the same PID, so status/progress/cancel
   stay responsive. Cancel order matters (verified): press Abort -> answer "Stop calculation" ->
   only then kill the ExecSolver/jam tree -> release the runner. Killing first crashed Designer.

@@ -94,7 +94,7 @@ Any MCP client can run the server with `<venv python> -m jmag_bridge` (stdio). C
 |---|---|
 | `JMAG_HOME` | JMAG installation folder (auto-detected under `C:`/`D:`/`E:` `\Program Files\JMAG-Designer*`) |
 | `JMAG_PYTHON` | override JMAG's bundled `python3.8\python.exe` |
-| `JMAG_BRIDGE_HOME` | state, logs, journal, docs index (default `%LOCALAPPDATA%\jmag-mcp-bridge`) |
+| `JMAG_BRIDGE_HOME` | state, logs, journal, docs index (default `%LOCALAPPDATA%\jmag-agent-suite`; an older `jmag-mcp-bridge` folder is reused if present) |
 
 </details>
 
