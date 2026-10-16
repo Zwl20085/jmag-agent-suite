@@ -1342,7 +1342,7 @@ def run(ctx, study, overwrite=True, model=None):
     out["elements"] = s.GetReport().NumElements()
     if not out["has_result"]:
         raise OpError("the solver finished without results (failed or cancelled)",
-                      "read errors below and the solver log (jmag_run_status / jmag_report)", data=out)
+                      "read errors below and the solver log (jmag_run_status / jmag_solver_report)", data=out)
     return out
 
 
@@ -1368,13 +1368,52 @@ def _tables(s):
     return rt, rows
 
 
+class _CaseScope(object):
+    """Make design-table case `case` (0-based) current while reading results; restore the previous one.
+
+    Verified on 23.0: Study.SetCurrentCase switches what GetResultTable() returns. Refused while JMAG runs a
+    solve, because switching the current case of the study being solved could disturb it."""
+
+    def __init__(self, ctx, s, case):
+        self.ctx, self.s, self.case, self.prev = ctx, s, case, None
+
+    def __enter__(self):
+        if self.case is None:
+            return self
+        n = self.s.GetDesignTable().NumCases()
+        c = int(self.case)
+        if c < 0 or c >= n:
+            raise OpError("case %s out of range; study %r has %d case(s) (0..%d)" % (c, self.s.GetName(), n, n - 1),
+                          "list cases with jmag_case_table(action='get')")
+        if self.ctx.app.HasRunningProcess():
+            raise OpError("JMAG is running a solve; switching the current case now could disturb it",
+                          "read per-case results after jmag_run_status reports finished")
+        self.prev = self.s.GetCurrentCase()
+        if self.prev != c:
+            self.s.SetCurrentCase(c)
+        return self
+
+    def __exit__(self, *exc):
+        if self.prev is not None and self.prev != int(self.case):
+            self.s.SetCurrentCase(self.prev)
+        return False
+
+
+def _need_result(s, case=None):
+    has = s.CaseHasResult(int(case)) if case is not None else s.HasResult()
+    if not has:
+        where = "case %s of study %r" % (case, s.GetName()) if case is not None else "study %r" % s.GetName()
+        raise OpError("%s has no results" % where, "run it first (jmag_run, or jmag_run_cases for design-table cases)")
+
+
 @op(read_only=True)
-def list_results(ctx, study, model=None):
+def list_results(ctx, study, case=None, model=None):
+    """Result tables of a study (current case, or design-table case `case`, 0-based)."""
     s = ctx.study(study, model)
-    if not s.HasResult():
-        raise OpError("study has no results", "run it first (jmag_run)")
-    _, rows = _tables(s)
-    return {"study": s.GetName(), "tables": rows}
+    _need_result(s, case)
+    with _CaseScope(ctx, s, case):
+        _, rows = _tables(s)
+    return {"study": s.GetName(), "case": case, "tables": rows}
 
 
 def _table_data(s, table):
@@ -1392,11 +1431,18 @@ def _table_data(s, table):
 
 
 @op(read_only=True)
-def get_result(ctx, study, table, columns=None, model=None):
-    """Return a result table: x axis (time [s] or step) and the selected columns."""
+def get_result(ctx, study, table, columns=None, case=None, model=None):
+    """Return a result table: x axis (time [s], frequency [Hz] for loss spectra, or step) and the selected columns.
+    case: design-table case index (0-based); default = the current case."""
     s = ctx.study(study, model)
-    if not s.HasResult():
-        raise OpError("study has no results", "run it first (jmag_run)")
+    _need_result(s, case)
+    with _CaseScope(ctx, s, case):
+        out = _read_table(s, table, columns)
+    out["case"] = case
+    return out
+
+
+def _read_table(s, table, columns=None):
     d, meta = _table_data(s, table)
     all_cols = [d.GetColName(j) for j in range(d.GetCols())]
     cols = columns or all_cols
@@ -1417,7 +1463,10 @@ def get_result(ctx, study, table, columns=None, model=None):
         unit = d.GetValueUnit()
     except Exception:
         unit = meta.get("unit", "")
-    return {"table": meta.get("title"), "unit": unit, "x_name": "time" if time_unit else "step",
+    x_name = "step"
+    if time_unit:  # loss studies report spectra: GetTime() is the frequency and GetTimeUnit() is "Hz" (23.0)
+        x_name = "frequency" if time_unit.strip().lower() in ("hz", "khz", "mhz") else "time"
+    return {"table": meta.get("title"), "unit": unit, "x_name": x_name,
             "x_unit": time_unit, "x": x, "columns": data, "steps": [d.GetStep(k) for k in range(n)]}
 
 
@@ -1434,7 +1483,7 @@ def export_results(ctx, study, out_dir, tables=None, model=None):
     for r in rows:
         if tables and r["name"] not in tables and r["title"] not in tables:
             continue
-        res = get_result(ctx, study, r["index"], None, model)
+        res = get_result(ctx, study, r["index"], None, model=model)
         safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", r["name"]).strip("_") or "table%d" % r["index"]
         path = os.path.join(out_dir, "%s__%s.csv" % (re.sub(r"[^A-Za-z0-9_.-]+", "_", s.GetName()), safe))
         cols = list(res["columns"].keys())
@@ -1560,6 +1609,1012 @@ def study_facts(ctx, study, model=None):
         facts["equations"] = {}
     ctx.app.ClearError()
     return facts
+
+
+# =========================================================================== advanced API (parametric cases,
+# loss study, efficiency map, winding, table export, case report, optimisation table, capabilities)
+#
+# Everything below follows the same rules as the ops above: Python 3.8 syntax, need() on every object,
+# read-back of everything set, no probing calls that make JMAG log errors. Members marked "verified" were
+# exercised on JMAG-Designer 23.0; see .claude/skills/jmag-simulation/references/advanced-api.md.
+
+#: feature -> API members that must exist in this JMAG's Python wrapper. hasattr() on the jmag.designer
+#: classes is pure Python (no JMAG call, no error log). Presence does not prove the licence has the module.
+API_FEATURES = [
+    ("parametric_cases", ["Study.GetDesignTable", "DesignTable.AddCases", "DesignTable.SetValue",
+                          "DesignTable.AllParameterNames", "Study.SetCurrentCase", "Study.CaseHasResult",
+                          "Study.RunAllCases"]),
+    ("loss_study", ["Study.CreateLossStudy", "MaterialObject.LoadLossData"]),
+    ("efficiency_map", ["Study.CreateEfficiencyMapDefinition", "Study.GetEfficiencyMapPlot",
+                        "EfficiencyMapDefinition.SetMaxVoltage", "EfficiencyMapPlot.ExportData"]),
+    ("optimization", ["Study.GetOptimizationTable", "Study.RunOptimization", "OptimizationTable.AddObjectiveItem",
+                      "OptimizationTable.AddParametricItem"]),
+    ("winding", ["Study.CreateWinding", "Study.CreateWindingRegion", "WindingDefinition.SetCoilTable",
+                 "WindingDefinition.CreateCoil"]),
+    ("table_export", ["Study.CreateTableDefinition", "Study.ExportTable", "Study.ExportResultValuesTable",
+                      "ResultTable.WriteAllTables"]),
+    ("case_report", ["Study.WriteCaseReport"]),
+    ("analysis_group", ["Application.CreateAnalysisGroup", "AnalysisGroup.RunAllCases"]),
+    ("batch_jobs", ["Application.CreateJob"]),
+    ("jmag_rt_export", ["Study.ExportRttFile"]),
+    ("express_motor_template", ["Application.CreateMotorTemplate"]),
+]
+
+#: solver/tool files in the installation folder (presence only; the licence decides whether they run)
+INSTALL_FILES = [
+    ("magnetic_solver", "ExecSolver.exe"),
+    ("iron_loss_solver", os.path.join("Tools", "Loss", "mod", "ironloss.exe")),
+    ("thermal_solver", "jheat.exe"),
+    ("optimization_engines", "OptimizationEngines"),
+    ("jmag_rt_maker", "RTMaker.exe"),
+    ("express", "Express"),
+]
+
+
+def _designer_module(ctx):
+    try:
+        ctx.module()
+    except Exception as e:  # no JMAG on this machine (offline tests)
+        return None, str(e)
+    return sys.modules.get("jmag.designer"), None
+
+
+def _study_type_family(t):
+    tl = t.lower()
+    for key, fam in (("heat", "thermal"), ("structural", "structural"), ("elec", "electric_field"),
+                     ("response", "response"), ("frequency", "magnetic_frequency"), ("transient", "magnetic_transient"),
+                     ("static", "magnetic_static")):
+        if key in tl:
+            return fam
+    return "other"
+
+
+@op(read_only=True)
+def capabilities(ctx, model=None):
+    """What this JMAG install/licence/API can do: version, study types per model, API feature members."""
+    dm, import_error = _designer_module(ctx)
+    api = {}
+    for feat, members in API_FEATURES:
+        have = {}
+        for mname in members:
+            cls, meth = mname.split(".")
+            have[mname] = bool(dm is not None and hasattr(getattr(dm, cls, None), meth))
+        api[feat] = {"available": all(have.values()), "members": have}
+    home = ctx.home or ""
+    out = {"worker_python": sys.version.split()[0], "jmag_home": home, "api": api,
+           "install_files": dict((k, os.path.exists(os.path.join(home, rel))) for k, rel in INSTALL_FILES),
+           "licence": {"queryable": False,
+                       "note": "JMAG 23 exposes no licence query in its Python API: a study type listed here can "
+                               "still fail at Run when the licence lacks that solver module (the run report then "
+                               "names it). Run jmag_self_test for a known-answer check of the magnetic solver.",
+                       "env": dict((k, v) for k, v in os.environ.items()
+                                   if k.upper().startswith(("LMX", "JMAG_LIC", "JMAG_LICENSE")))}}
+    if import_error:
+        out["import_error"] = import_error
+    if not ctx.connected():
+        out["connected"] = False
+        out["hint"] = "connect (jmag_connect) and import a model to list the study types JMAG offers"
+        return out
+    app = ctx.app
+    out["connected"] = True
+    out["version"] = app.VersionString(True)
+    try:
+        out["express_mode"] = bool(app.IsExpressMode())
+    except Exception:
+        pass
+    models = []
+    refs = [model] if model else [app.GetModel(i).GetName() for i in range(app.NumModels())]
+    for ref in refs:
+        m = ctx.model(ref)
+        types = list(m.GetStudyTypeNames() or [])
+        fams = {}
+        for t in types:
+            fams.setdefault(_study_type_family(t), []).append(t)
+        models.append({"model": m.GetName(), "dimension": m.GetDimension(), "study_types": types, "by_family": fams})
+    out["models"] = models
+    if not models:
+        out["hint"] = "no model yet: study types are listed per model (2D and 3D differ); import geometry first"
+    return out
+
+
+# --------------------------------------------------------------------------- design table (parametric cases)
+
+def _dt(s):
+    return need(s.GetDesignTable(), "design table of study %r" % s.GetName())
+
+
+def _short_param(full):
+    """'Motion (RotationMotion2D): AngularVelocity' -> 'Motion: AngularVelocity'."""
+    owner, sep, prop = str(full).partition(": ")
+    return re.sub(r"\s*\([^)]*\)", "", owner).strip() + sep + prop
+
+
+def _dt_params(t):
+    rows = []
+    for i in range(t.NumParameters()):
+        rows.append({"index": i, "name": t.ParameterName(i), "type": t.ParameterTypeName(i),
+                     "variable": t.GetVariableName(i)})
+    return rows
+
+
+def _param_index(t, name):
+    """Index of an existing design-table parameter by full name, short name, equation name or variable name."""
+    params = _dt_params(t)
+    for key in ("name",):
+        for p in params:
+            if p[key] == name:
+                return p["index"]
+    for p in params:
+        if p["name"] == "Equation parameters: %s" % name or _short_param(p["name"]) == name or p["variable"] == name:
+            return p["index"]
+    return None
+
+
+def _resolve_addable(t, name):
+    """Full design-table name for `name` (exact, or the short 'Owner: Prop' form), else OpError with hints."""
+    allnames = list(t.AllParameterNames() or [])
+    if name in allnames:
+        return name
+    hits = [n for n in allnames if _short_param(n) == name]
+    if len(hits) == 1:
+        return hits[0]
+    if len(hits) > 1:
+        raise OpError("parameter name %r is ambiguous" % name, "use one of the full names: %s" % hits)
+    shorts = [_short_param(n) for n in allnames]
+    raise OpError("%r is not a parameter of this study" % name,
+                  "closest: %s. Names look like 'Motion (RotationMotion2D): AngularVelocity' (short form "
+                  "'Motion: AngularVelocity' is accepted); list them with jmag_case_table(action='get', "
+                  "candidates='Motion'). New equations come from jmag_set_equations and join the table "
+                  "automatically." % close_matches(name, shorts + allnames, n=6))
+
+
+def _case_table_dump(ctx, s, max_cases=200, candidates=None):
+    t = _dt(s)
+    params = _dt_params(t)
+    eqs = []  # equations join the table as 'Equation parameters: <name>' (verified 23.0); look up by name
+    for p in params:
+        if p["type"] == "Equation" and p["variable"] and t.HasEquation(p["variable"]):
+            eq = t.GetEquation(p["variable"])
+            if eq is not None and eq.IsValid():
+                eqs.append(eq)
+    n = t.NumCases()
+    cases = []
+    for c in range(min(n, int(max_cases))):
+        row = {"case": c, "label": t.GetLabel(c), "active": bool(t.IsActive(c)), "has_result": bool(s.CaseHasResult(c)),
+               "values": dict((p["name"], jsonable(t.GetValue(c, p["index"]))) for p in params)}
+        if eqs:
+            row["equation_values"] = dict((e.GetName(), e.GetValue(c)) for e in eqs)
+        cases.append(row)
+    out = {"study": s.GetName(), "current_case": s.GetCurrentCase(), "num_cases": n, "parameters": params,
+           "equations": dict((e.GetName(), {"expression": e.GetExpression(), "type": "value" if e.GetType() == 0 else "expression"})
+                             for e in eqs),
+           "cases": cases}
+    if n > len(cases):
+        out["truncated"] = "showing %d of %d cases (max_cases)" % (len(cases), n)
+    if candidates is not None:
+        allnames = list(t.AllParameterNames() or [])
+        q = str(candidates).lower()
+        hits = [x for x in allnames if q in x.lower()]
+        out["candidates"] = {"filter": candidates, "count": len(hits), "names": hits[:150]}
+    return out
+
+
+@op(read_only=True)
+def case_table_get(ctx, study, max_cases=200, candidates=None, model=None):
+    """Design table: parameters, cases (values, active, has_result), equations; candidates=<filter> lists addable names."""
+    s = ctx.study(study, model)
+    return _case_table_dump(ctx, s, max_cases, candidates)
+
+
+def _set_case_values(t, case, values, report):
+    applied = {}
+    for pname, val in values.items():
+        idx = _param_index(t, pname)
+        if idx is None:
+            raise OpError("parameter %r is not in the design table" % pname,
+                          "add it first with add_parameters=[...]; parameters: %s"
+                          % [p["name"] for p in _dt_params(t)])
+        t.SetValue(int(case), idx, val)
+        got = jsonable(t.GetValue(int(case), idx))
+        row = {"parameter": t.ParameterName(idx), "set": val, "read": got}
+        if not isinstance(val, str) and not _num_equal(val, got):
+            row["mismatch"] = True
+        applied[pname] = row
+    report.append({"case": int(case), "applied": applied})
+
+
+@op()
+def case_table_set(ctx, study, add_parameters=None, cases=None, set_cases=None, remove_cases=None, active=None,
+                   current_case=None, model=None):
+    """Edit the design table: add parameters, append cases, change/remove cases, (de)activate, set current case."""
+    s = ctx.study(study, model)
+    t = _dt(s)
+    report = {"added_parameters": [], "new_cases": [], "changed_cases": [], "removed_cases": [], "active": {}}
+    # validate everything that can be validated before changing anything
+    full = [(_resolve_addable(t, p) if _param_index(t, p) is None else None, p) for p in (add_parameters or [])]
+    n0 = t.NumCases()
+    for row in set_cases or []:
+        c = int(row["case"])
+        if c < 0 or c >= n0:
+            raise OpError("case %s out of range (0..%d)" % (c, n0 - 1))
+    for name, orig in full:
+        if name is None:
+            report["added_parameters"].append({"name": orig, "state": "already present"})
+            continue
+        before = t.NumParameters()
+        t.AddParameter(name)
+        if t.NumParameters() <= before:
+            raise OpError("design table did not accept parameter %r" % name, "check jmag_messages", data=report)
+        report["added_parameters"].append({"name": name, "state": "added", "index": t.NumParameters() - 1})
+    for values in cases or []:
+        missing = [k for k in values if _param_index(t, k) is None]
+        if missing:
+            raise OpError("unknown parameter(s) %s in a new case" % missing,
+                          "add them with add_parameters; parameters: %s" % [p["name"] for p in _dt_params(t)],
+                          data=report)
+    for values in cases or []:
+        before = t.NumCases()
+        t.AddCases(1)
+        if t.NumCases() != before + 1:
+            raise OpError("AddCases(1) did not add a case", data=report)
+        _set_case_values(t, before, values, report["new_cases"])
+    for row in set_cases or []:
+        _set_case_values(t, int(row["case"]), row.get("values") or {}, report["changed_cases"])
+    for c in sorted(set(int(x) for x in (remove_cases or [])), reverse=True):
+        before = t.NumCases()
+        if c < 0 or c >= before:
+            raise OpError("case %s out of range (0..%d)" % (c, before - 1), data=report)
+        t.RemoveCase(c)
+        if t.NumCases() != before - 1:
+            raise OpError("case %s was not removed (case 0 is the base case and may not be removable)" % c, data=report)
+        report["removed_cases"].append(c)
+    for k, v in (active or {}).items():
+        c = int(k)
+        t.SetActive(c, 1 if v else 0)
+        report["active"][str(c)] = bool(t.IsActive(c))
+    if current_case is not None:
+        s.SetCurrentCase(int(current_case))
+        report["current_case"] = s.GetCurrentCase()
+    out = _case_table_dump(ctx, s)
+    out["applied"] = report
+    return out
+
+
+def _calc_folder_of(s):
+    try:
+        return s.GetReport().GetCalculationFolder()
+    except Exception:
+        return None
+
+
+def _write_progress(path, data):
+    if not path:
+        return
+    tmp = path + ".tmp"
+    with io.open(tmp, "w", encoding="utf-8") as f:
+        f.write(json.dumps(jsonable(data)))
+    os.replace(tmp, path)
+
+
+@op()
+def run_cases(ctx, study, cases=None, overwrite=True, method="loop", progress_file=None, cancel_file=None, model=None):
+    """Solve design-table cases (all or a subset) in the foreground of this worker.
+
+    method='loop' (default): SetCurrentCase(k) + Run() per case; writes progress_file (JSON) before each case and
+    stops starting new cases once cancel_file exists. method='all_cases': activates exactly the chosen cases and
+    calls Study.RunAllCases() once (activity restored afterwards). method='optimization': Study.RunOptimization()."""
+    s = ctx.study(study, model)
+    t = _dt(s)
+    n = t.NumCases()
+    sel = list(range(n)) if cases is None else [int(c) for c in cases]
+    bad = [c for c in sel if c < 0 or c >= n]
+    if bad:
+        raise OpError("case(s) %s out of range; study has %d case(s) (0..%d)" % (bad, n, n - 1))
+    if method not in ("loop", "all_cases", "optimization"):
+        raise OpError("unknown method %r" % method, "loop | all_cases | optimization")
+    if ctx.app.HasRunningProcess():
+        raise OpError("JMAG is already running an analysis", "wait or cancel it (jmag_cancel_run)")
+    prev = s.GetCurrentCase()
+    rows = []
+    t_all = time.time()
+    state = {"state": "running", "study": s.GetName(), "method": method, "cases": sel, "done": rows,
+             "current_case": None, "folder": None, "started": t_all}
+    if method == "optimization":
+        state["folder"] = _calc_folder_of(s)
+        _write_progress(progress_file, state)
+        s.RunOptimization()
+        n2 = t.NumCases()
+        rows.extend({"case": c, "has_result": bool(s.CaseHasResult(c))} for c in range(n2))
+        out = {"study": s.GetName(), "method": method, "cases_before": n, "cases_after": n2, "cases": rows,
+               "seconds": round(time.time() - t_all, 2)}
+        state.update(state="finished")
+        _write_progress(progress_file, state)
+        return out
+    if method == "all_cases":
+        old = [bool(t.IsActive(c)) for c in range(n)]
+        for c in range(n):
+            t.SetActive(c, 1 if c in sel else 0)
+        for c in sel:
+            if s.CaseHasResult(c):
+                if not overwrite:
+                    raise OpError("case %s already has results" % c, "pass overwrite=true or choose other cases")
+                s.DeleteResultCase(c)
+        state["folder"] = _calc_folder_of(s)
+        _write_progress(progress_file, state)
+        try:
+            s.RunAllCases()
+        finally:
+            for c in range(n):
+                t.SetActive(c, 1 if old[c] else 0)
+        for c in sel:
+            rows.append({"case": c, "state": "finished" if s.CaseHasResult(c) else "failed"})
+    else:
+        try:
+            for k, c in enumerate(sel):
+                if cancel_file and os.path.exists(cancel_file):
+                    rows.append({"case": c, "state": "cancelled"})
+                    continue
+                s.SetCurrentCase(c)
+                if s.CaseHasResult(c):
+                    if not overwrite:
+                        rows.append({"case": c, "state": "skipped", "reason": "has results (overwrite=false)"})
+                        continue
+                    s.DeleteResultCurrentCase()
+                folder = _calc_folder_of(s)
+                state.update(current_case=c, index=k, folder=folder)
+                _write_progress(progress_file, state)
+                t0 = time.time()
+                s.Run()
+                row = {"case": c, "state": "finished" if s.CaseHasResult(c) else "failed",
+                       "seconds": round(time.time() - t0, 2), "calc_folder": folder}
+                row.update(_report_messages(s))
+                rows.append(row)
+                _write_progress(progress_file, state)
+        finally:
+            if s.GetCurrentCase() != prev:
+                s.SetCurrentCase(prev)
+    state.update(state="finished", current_case=None)
+    _write_progress(progress_file, state)
+    out = {"study": s.GetName(), "method": method, "cases": rows, "seconds": round(time.time() - t_all, 2),
+           "finished": [r["case"] for r in rows if r.get("state") == "finished"],
+           "failed": [r["case"] for r in rows if r.get("state") == "failed"]}
+    if sel and not out["finished"] and not any(r.get("state") in ("skipped", "cancelled") for r in rows):
+        raise OpError("no case produced results", "read the per-case errors below and the solver log", data=out)
+    return out
+
+
+# --------------------------------------------------------------------------- iron-loss study
+
+def _loss_material_report(ctx, s, m, parts):
+    """Materials behind the loss parts. Verified on 23.0: GetValue on a library steel's Loss_* properties
+    logs 'The property should be a flag or real property' (library materials are protected), so the loss data
+    itself is not read; a part whose loss comes out exactly 0 W after the run is the tell-tale of missing data."""
+    out = {}
+    for p in parts:
+        mat = s.GetMaterial(p)
+        out[p] = {"material": mat.GetName() if mat is not None and mat.IsValid() else None}
+    return out
+
+
+@op()
+def create_loss_study(ctx, study, name, parts=None, frequency_hz=None, reference_steps=None, properties=None,
+                      study_properties=None, replace=False, model=None):
+    """Iron-loss study from a solved Transient study (Study.CreateLossStudy) + its Ironloss condition."""
+    s = ctx.study(study, model)
+    m = ctx.model_of(s)
+    stype = s.GetScriptTypeName()
+    if not (stype.startswith("Transient") or stype.startswith("Frequency")):
+        raise OpError("iron-loss studies are derived from a Transient (or Frequency) study, not %s" % stype,
+                      "create it from the solved Transient2D/Transient study")
+    existing = [m.GetStudy(j).GetName() for j in range(m.NumStudies())]
+    if name in existing:
+        if not replace:
+            raise OpError("study %r already exists" % name, "pass replace=true or choose another name")
+        m.DeleteStudy(name)
+    ls = need(s.CreateLossStudy(name), "loss study %r" % name)
+    cond = None
+    for i in range(ls.NumConditions()):
+        c = ls.GetCondition(i)
+        if c.GetScriptTypeName() == "Ironloss":
+            cond = c
+            break
+    if cond is None:  # 23.0 creates 'untitled 1' (Ironloss) by itself; create one if a later version does not
+        _check_type(ls, "Ironloss")
+        cond = need(ls.CreateCondition("Ironloss", "IronLoss"), "Ironloss condition")
+    vals = {}
+    if frequency_hz is not None:
+        vals["BasicFrequency"] = float(frequency_hz)
+    if reference_steps:
+        a, b = int(reference_steps[0]), int(reference_steps[1])
+        vals.update({"UseStartReferenceStep": 1, "StartReferenceStep": a, "UseEndReferenceStep": 1, "EndReferenceStep": b})
+    vals.update(properties or {})
+    applied = set_props(cond, vals) if vals else {}
+    sel = select_parts(cond, m, parts) if parts else []
+    sp_applied = set_props(ls.GetStudyProperties(), study_properties) if study_properties else {}
+    out = {"study": ls.GetName(), "type": ls.GetScriptTypeName(), "source_study": s.GetName(),
+           "source_has_result": bool(s.HasResult()), "condition": _cond_summary(ls, cond), "applied": applied,
+           "parts": sel, "study_properties_applied": sp_applied,
+           "study_properties": get_props(ls.GetStudyProperties()),
+           "condition_types": list(ls.GetConditionTypes() or [])}
+    out["materials"] = _loss_material_report(ctx, s, m, sel)
+    hints = []
+    if not sel:
+        hints.append("no parts selected: pass parts=[iron cores] (Ironloss condition starts empty)")
+    bf = read_prop(cond, "BasicFrequency")[1]
+    if (bf is None or _num_equal(bf, 0.0)) and frequency_hz is None:
+        hints.append("BasicFrequency is 0: pass frequency_hz (electrical frequency) or the solver aborts with "
+                     "'Frequency is 0[Hz]'")
+    if not s.HasResult():
+        hints.append("the source study has no results yet: run it first, then run this loss study")
+    out["next"] = "; ".join(hints) if hints else "run it with jmag_run(study=%r) (seconds), then jmag_loss_study(action='results')" % name
+    return out
+
+
+@op(read_only=True)
+def loss_results(ctx, study, case=None, tables=None, include_spectrum=False, model=None):
+    """Loss tables (names containing 'Loss') of a solved loss study: total per part and overall."""
+    s = ctx.study(study, model)
+    _need_result(s, case)
+    out = []
+    with _CaseScope(ctx, s, case):
+        _, rows = _tables(s)
+        want = [r for r in rows if "loss" in r["name"].lower()]
+        if tables:
+            keys = [str(x).lower() for x in tables]
+            want = [r for r in rows if r["name"].lower() in keys or r["title"].lower() in keys]
+        for r in want:
+            res = _read_table(s, r["index"])
+            # Verified on 23.0: row 0 ('Step 0', 0 Hz) holds the total; rows 1.. are the frequency components
+            # (their sum equals row 0 for Joule loss; hysteresis is only in row 0). Iron = Hysteresis + Joule.
+            # Tables without '(Each Component)' carry an extra 'Total' column.
+            cols = res["columns"]
+            totals = dict((c, float(v[0])) for c, v in cols.items() if v and c != "Total")
+            nz = dict((c, v) for c, v in totals.items() if abs(v) > 0)
+            total = float(cols["Total"][0]) if "Total" in cols and cols["Total"] else float(sum(totals.values()))
+            row = {"table": res["table"], "unit": res["unit"], "x_name": res["x_name"], "x_unit": res["x_unit"],
+                   "rows": len(res["x"]), "total": total,
+                   "per_part": dict(sorted(nz.items(), key=lambda kv: -abs(kv[1])))}
+            spec = dict((c, float(sum(v[1:]))) for c, v in cols.items() if c in nz and len(v) > 1)
+            if any(abs(v) > 0 for v in spec.values()):
+                row["spectrum_sum_rows_1_on"] = spec
+            if include_spectrum:
+                row["x"] = res["x"]
+                row["columns"] = dict((c, v) for c, v in res["columns"].items() if c in nz)
+            out.append(row)
+    if not out:
+        raise OpError("no loss tables in study %r" % s.GetName(),
+                      "tables: %s. Loss tables exist in a solved loss study (jmag_loss_study)" % [r["name"] for r in rows])
+    return {"study": s.GetName(), "case": case, "tables": out,
+            "note": "total/per_part = row 0 (the total, labelled 0 Hz); rows 1.. are frequency components (x in Hz)"}
+
+
+# --------------------------------------------------------------------------- efficiency map
+
+#: user key -> (setter, getter or None) on EfficiencyMapDefinition (names from the 23.0 API docs)
+EFF_MAP_SETTINGS = {
+    "table": ("SetTable", "TableName"),
+    "max_voltage": ("SetMaxVoltage", "MaxVoltage"),
+    "max_current": ("SetMaxCurrent", "MaxCurrent"),
+    "max_field_current": ("SetMaxFieldCurrent", "MaxFieldCurrent"),
+    "voltage_limit_type": ("SetVoltageLimitType", "VoltageLimitType"),
+    "motor_control_type": ("SetMotorControlType", "MotorControlType"),
+    "control": ("SetControlType", "ControlName"),
+    "mechanical_loss_factor": ("SetMechancialLossFactor", "MechancialLossFactor"),
+    "correction_type": ("SetCorrectionType", "CorrectionType"),
+    "motor_mode": ("SetMotorMode", "MotorMode"),
+    "torque_type": ("SetTorqueType", "TorqueType"),
+    "speed_divisions": ("SetXAxisDivisions", "XAxisDivisions"),
+    "torque_divisions": ("SetYAxisDivisions", "YAxisDivisions"),
+    "add_pwm_iron_loss": ("SetAddPWMIronLoss", "AddPWMIronLoss"),
+    "dc_bus_voltage": ("SetDCBusVoltage", "DCBusVoltage"),
+    "carrier_frequency": ("SetCarrierFrequency", "CarrierFrequency"),
+    "add_magnet_loss": ("SetAddMagnetLoss", "GetAddMagnetLoss"),
+    "add_ac_loss": ("SetAddACLoss", "AddACLoss"),
+    "extrapolation": ("SetExtrapolation", "GetExtrapolation"),
+    "cluster_points": ("SetClusterPoints", "ClusterPoints"),
+    "loss_correction": ("SetLossCorrection", "GetLossCorrection"),
+    "coil_temperature_correction": ("SetCoilTemperatureCorrection", None),
+    "magnet_temperature_correction": ("SetMagnetTemperatureCorrection", None),
+    "magnet_correction_base_temperature": ("SetMagnetCorrectionBaseTemperature", None),
+}
+
+
+def _eff_map_find(s, name):
+    for i in range(s.NumEfficiencyMapDefinitions()):
+        d = s.GetEfficiencyMapDefinition(i)
+        if d is not None and d.IsValid() and d.Name() == name:
+            return d
+    return None
+
+
+def _eff_map_state(d):
+    out = {}
+    for key, (_, getter) in sorted(EFF_MAP_SETTINGS.items()):
+        if getter and hasattr(d, getter):
+            try:
+                out[key] = jsonable(getattr(d, getter)())
+            except Exception as e:
+                out[key] = "unreadable: %s" % e
+    for key, getter in (("magnet_temperature_initial", "GetInitialMagnetTemperature"),
+                        ("magnet_temperature_end", "GetEndMagnetTemperature")):
+        try:
+            out[key] = getattr(d, getter)()
+        except Exception:
+            pass
+    return out
+
+
+@op()
+def efficiency_map_create(ctx, study, name, settings=None, magnet_temperatures=None, model=None):
+    """Create (or update) an EfficiencyMapDefinition and apply settings with read-back."""
+    s = ctx.study(study, model)
+    settings = settings or {}
+    unknown = [k for k in settings if k not in EFF_MAP_SETTINGS]
+    if unknown:
+        raise OpError("unknown efficiency-map setting(s) %s" % unknown,
+                      "valid: %s; closest: %s" % (sorted(EFF_MAP_SETTINGS),
+                                                 dict((k, close_matches(k, EFF_MAP_SETTINGS)) for k in unknown)))
+    d = _eff_map_find(s, name)
+    created = d is None
+    if d is None:
+        d = s.CreateEfficiencyMapDefinition(name)
+        need(d, "efficiency map definition %r" % name,
+             "JMAG builds efficiency maps in an efficiency-map (response) study; %s is a %s study. Create the map "
+             "study in the JMAG GUI or from a Transient study with the Efficiency Map wizard, then pass its name"
+             % (s.GetName(), s.GetScriptTypeName()))
+    applied = {}
+    for key, val in settings.items():
+        setter, getter = EFF_MAP_SETTINGS[key]
+        if not hasattr(d, setter):
+            applied[key] = {"set": val, "error": "this JMAG has no %s" % setter}
+            continue
+        getattr(d, setter)(val)
+        row = {"set": val}
+        if getter and hasattr(d, getter):
+            got = jsonable(getattr(d, getter)())
+            row["read"] = got
+            if not _num_equal(val, got) and str(val) != str(got):
+                row["mismatch"] = True
+        else:
+            row["read"] = "no getter in the API"
+        applied[key] = row
+    if magnet_temperatures:
+        mt = magnet_temperatures
+        d.SetMagnetCorrection(float(mt["initial"]), float(mt["end"]), int(mt.get("divisions", 1)))
+        applied["magnet_temperatures"] = {"set": mt, "read": [d.GetInitialMagnetTemperature(), d.GetEndMagnetTemperature()]}
+    return {"study": s.GetName(), "map": d.Name(), "created": created, "applied": applied, "state": _eff_map_state(d),
+            "next": "solve the map study, then jmag_efficiency_map(action='results')"}
+
+
+@op()
+def efficiency_map_results(ctx, study, name=None, out_dir=None, result_types=None, points=None, image=False, model=None):
+    """Read an efficiency map plot: result types, axis ranges; optional CSV/PNG export and point queries.
+    Not read-only: ExportData/SaveMapImage write files."""
+    s = ctx.study(study, model)
+    n = s.NumEfficiencyMapDefinitions()
+    names = [s.GetEfficiencyMapDefinition(i).Name() for i in range(n)]
+    if not names:
+        raise OpError("study %r has no efficiency map definitions" % s.GetName(),
+                      "create one with jmag_efficiency_map(action='create') in an efficiency-map study")
+    name = name or names[0]
+    if name not in names:
+        raise OpError("efficiency map %r not found" % name, "maps: %s" % names)
+    plot = need(s.GetEfficiencyMapPlot(name), "efficiency map plot %r" % name, "solve the map study first")
+    types = []
+    for i in range(plot.NumResults()):
+        types.append({"index": i, "type": plot.GetResultType(i), "name": plot.GetResultTypeName(i)})
+    out = {"study": s.GetName(), "map": name, "result_types": types,
+           "speed_range": [plot.GetResultMinXValue(), plot.GetResultMaxXValue(), plot.GetResultXDivisions()],
+           "torque_range": [plot.GetResultMinYValue(), plot.GetResultMaxYValue(), plot.GetResultYDivisions()],
+           "definition": _eff_map_state(s.GetEfficiencyMapDefinition(names.index(name)))}
+    wanted = result_types or [t["name"] for t in types]
+    if out_dir:
+        out_dir = os.path.abspath(out_dir)
+        os.makedirs(out_dir, exist_ok=True)
+        files = []
+        for rtype in wanted:
+            safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(rtype)).strip("_")
+            p = os.path.join(out_dir, "%s__%s.csv" % (re.sub(r"[^A-Za-z0-9_.-]+", "_", name), safe))
+            plot.ExportData(rtype, p)
+            row = {"type": rtype, "csv": p, "written": os.path.isfile(p)}
+            if image:
+                png = p[:-4] + ".png"
+                row["png_ok"] = bool(plot.SaveMapImage(rtype, png, 1200, 900))
+                row["png"] = png
+            files.append(row)
+        out["files"] = files
+    if points:
+        vals = []
+        for xy in points:
+            x, y = float(xy[0]), float(xy[1])
+            row = {"speed": x, "torque": y, "valid": bool(plot.IsValidPoint(x, y))}
+            if row["valid"]:
+                row["values"] = dict((rt, plot.GetPointResult(rt, x, y)) for rt in wanted)
+            vals.append(row)
+        out["points"] = vals
+    return out
+
+
+# --------------------------------------------------------------------------- winding
+
+def _coil_direction(c):
+    return "up" if direction_flag(c.get("direction", "up")) == 0 else "down"
+
+
+def _coil_part(c, slot_parts):
+    if c.get("part"):
+        return c["part"]
+    if slot_parts:
+        for key in ("%s/%s" % (c.get("slot"), c.get("layer")), str(c.get("slot"))):
+            if key in slot_parts:
+                return slot_parts[key]
+    return None
+
+
+@op()
+def winding_apply(ctx, study, coils, mode="fem_coil", name="Phase", components=None, slot_parts=None,
+                  phase_turns=None, slots=None, poles=None, layers=None, winding_type="ThreePhase",
+                  reference_slot_parts=None, replace=False, force=False, model=None):
+    """Apply a coil list [{slot, phase, direction, layer, turns, part?}] to a study.
+
+    mode='fem_coil' (verified path): one FEMCoil condition per phase linked to circuit component
+    components[phase] (default 'Coil<phase>'), sides grouped by direction; Turn = phase_turns[phase] or
+    sum(coil turns)/2 (every turn has a go and a return side; assumes all coils of a phase in series).
+    mode='jmag_winding': JMAG's own winding definition (WindingRegion + WindingDefinition, manual coil table)."""
+    s = ctx.study(study, model)
+    if isinstance(coils, dict):  # labels-JSON form {"U": {"up": [parts], "down": [parts]}, ...}
+        coils = [{"phase": ph, "direction": d, "part": part}
+                 for ph, sides in coils.items() for d in ("up", "down") for part in (sides.get(d) or [])]
+    if not coils:
+        raise OpError("coils is empty", "pass slot_map (or labels_coils) from jmag_winding_plan")
+    pairs_given = all("go_slot" in c and "return_slot" in c for c in coils)
+    if pairs_given and mode == "fem_coil":
+        raise OpError("coils look like a coil_list (go_slot/return_slot)",
+                      "mode='fem_coil' needs per-side entries with parts: pass slot_map or labels_coils")
+    phases = []
+    groups = {}
+    turns = {}
+    owner = {}
+    for i, c in enumerate(coils):
+        if "phase" not in c:
+            raise OpError("coil %d has no phase" % i)
+        ph = str(c["phase"])
+        if ph not in groups:
+            phases.append(ph)
+            groups[ph] = {"up": [], "down": []}
+            turns[ph] = 0.0
+        d = "up" if pairs_given else _coil_direction(c)
+        if mode == "fem_coil":
+            part = _coil_part(c, slot_parts)
+            if part is None:
+                raise OpError("coil %d (slot %s, layer %s) has no part" % (i, c.get("slot"), c.get("layer")),
+                              "give coils[i].part or slot_parts={'1': 'Slot01_U+'} ('1/2' = slot 1, layer 2)")
+            tag = ph + ("+" if d == "up" else "-")
+            if owner.get(part, tag) != tag:
+                raise OpError("part %r is used by %s and %s" % (part, owner[part], tag),
+                              "a part carries one phase and direction; draw one part per layer for double-layer windings")
+            owner[part] = tag
+            if part not in groups[ph][d]:
+                groups[ph][d].append(part)
+        else:
+            groups[ph][d].append(c)
+        if c.get("turns") is not None:
+            turns[ph] += float(c["turns"])
+    if mode == "fem_coil":
+        circ = _get_circuit(s, create=False)
+        have = _comp_names(circ)
+        out = {"mode": mode, "phases": {}}
+        for ph in phases:
+            comp = (components or {}).get(ph) or "Coil%s" % ph
+            if comp not in have:
+                raise OpError("circuit has no component %r for phase %s" % (comp, ph),
+                              "components: %s. Build the circuit first (jmag_circuit_quick) or pass components={'%s': ...}"
+                              % (have, ph))
+            sides = [{"parts": groups[ph][d], "direction": d} for d in ("up", "down") if groups[ph][d]]
+            n_turns = (phase_turns or {}).get(ph)
+            if n_turns is None and turns[ph] > 0:
+                n_turns = turns[ph] / 2.0
+            res = _fem_group(ctx, study, "FEMCoil", "FEMCoilData", "%s%s" % (name, ph), comp, sides,
+                             {"Turn": n_turns} if n_turns else None, replace, model)
+            out["phases"][ph] = {"condition": "%s%s" % (name, ph), "component": comp, "turns": n_turns,
+                                 "up": groups[ph]["up"], "down": groups[ph]["down"], "summary": res["condition"]}
+        return out
+    if mode != "jmag_winding":
+        raise OpError("unknown mode %r" % mode, "fem_coil | jmag_winding")
+    if not force:
+        raise OpError("mode='jmag_winding' crashed JMAG-Designer 23.0 in the bridge's live test (winding region + "
+                      "manual winding definition on a 2D SPM model); refused by default",
+                      "use mode='fem_coil' (verified). Pass force=true only on a saved project you can reopen")
+    if not (slots and poles):
+        raise OpError("mode='jmag_winding' needs slots and poles")
+    m = ctx.model_of(s)
+    if replace:
+        for i in range(s.NumWindings() - 1, -1, -1):
+            if s.GetWinding(i).GetName() == name:
+                s.DeleteWinding(i)
+    reg = need(s.CreateWindingRegion("%sRegion" % name, 0), "winding region")
+    reg.SetSlots(int(slots))
+    reg.SetPoles(int(poles))
+    for layer, plist in (reference_slot_parts or {}).items():
+        for p in plist:
+            reg.AddPart(int(layer), resolve_part(m, p))
+    wd = need(s.CreateWinding(winding_type, name), "winding definition (%s)" % winding_type)
+    wd.SetRegion(reg.GetName())
+    wd.SetWindingScheme("Manual")
+    if layers:
+        wd.SetLayers(int(layers))
+    tables = {}
+    for k, ph in enumerate(phases):
+        if pairs_given:
+            pairs = [[int(c["go_slot"]), int(c["return_slot"])] for c in groups[ph]["up"]]
+        else:
+            ups = sorted(groups[ph]["up"], key=lambda c: int(c.get("slot", 0)))
+            downs = sorted(groups[ph]["down"], key=lambda c: int(c.get("slot", 0)))
+            if len(ups) != len(downs):
+                raise OpError("phase %s has %d go and %d return sides" % (ph, len(ups), len(downs)),
+                              "manual winding tables pair each go slot with a return slot; pass coil_list")
+            pairs = [[int(a["slot"]), int(b["slot"])] for a, b in zip(ups, downs)]
+        wd.SetCoilTable(k, pairs)
+        tables[ph] = {"set": pairs, "read": jsonable(wd.GetCoilTable(k))}
+    return {"mode": mode, "winding": wd.GetName(), "type": wd.WindingType(), "region": wd.Region(),
+            "slots": wd.Slots(), "poles": wd.Poles(), "layers": wd.Layers(), "scheme": wd.WindingScheme(),
+            "coil_tables": tables, "num_coils": wd.NumCoils(), "uses_winding": bool(s.HasUseWinding())}
+
+
+# --------------------------------------------------------------------------- table export / case report
+
+EXPORT_KINDS = ("all_tables", "all_cases", "table", "field", "field_values", "field_minmax")
+
+
+@op()
+def export_table(ctx, study, path, kind="all_tables", table=None, result_type=None, component=None, steps=None,
+                 axis="Time", filetype=0, case=None, overwrite=True, force=False, model=None):
+    """Export result tables with JMAG's own writers (CSV/TXT/HTM by extension).
+
+    Verified on 23.0: all_tables, all_cases, table. kind='field' returned False with 'There is no selected item.
+    (Study::ExportTable)' (it needs a GUI selection the API does not set); the probe sequence ExportTable ->
+    ExportResultValuesTable crashed Designer, so field_values/field_minmax are refused unless force=True."""
+    s = ctx.study(study, model)
+    if kind not in EXPORT_KINDS:
+        raise OpError("unknown kind %r" % kind, "valid: %s" % (EXPORT_KINDS,))
+    if kind in ("field_values", "field_minmax") and not force:
+        raise OpError("kind=%r is suspected of crashing JMAG-Designer 23.0 (seen once in the bridge's live probe)" % kind,
+                      "use kind='all_tables'/'table', jmag_export_results, or a probe; force=true on a saved project")
+    path = os.path.abspath(path)
+    if os.path.splitext(path)[1].lower() not in (".csv", ".txt", ".htm", ".html"):
+        raise OpError("path must end with .csv, .txt or .htm", "JMAG picks the format from the extension")
+    if os.path.exists(path):
+        if not overwrite:
+            raise OpError("%s exists" % path, "pass overwrite=true")
+        os.remove(path)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    _need_result(s, case)
+    ok = None
+    with _CaseScope(ctx, s, case):
+        if kind == "all_tables":
+            s.GetResultTable().WriteAllTables(path, axis)
+        elif kind == "all_cases":
+            s.GetResultTable().WriteAllCaseTables(path, axis)
+        elif kind == "table":
+            if table is None:
+                raise OpError("kind='table' needs table=<name>", "names: jmag_list_results")
+            d, _ = _table_data(s, table)
+            d.WriteTable(path, axis)
+        else:
+            td = need(s.CreateTableDefinition(), "table definition")
+            types = list(td.GetResultTypeNames() or [])
+            if result_type not in types:
+                raise OpError("result_type %r not available" % (result_type,),
+                              "valid: %s; closest: %s" % (types, close_matches(result_type, types)))
+            td.SetResultType(result_type, "")
+            comps = list(td.GetComponentNames() or [])
+            if component:
+                if comps and component not in comps:
+                    raise OpError("component %r invalid for %s" % (component, result_type), "valid: %s" % comps)
+                td.SetComponent(component)
+            if steps is None or steps == "all":
+                td.SetAllSteps()
+            else:
+                td.SetStepsByString(str(steps))
+            if kind == "field":
+                ok = s.ExportTable(td, path, filetype)
+            elif kind == "field_values":
+                ok = s.ExportResultValuesTable(td, path)
+            else:
+                ok = s.ExportMinMaxTable(td, path)
+    if not os.path.isfile(path):
+        hint = "check jmag_messages"
+        if kind == "field":
+            hint = ("field tables need parts selected in the JMAG GUI ('There is no selected item'); use "
+                    "jmag_contour_image for field values or kind='all_tables' for result tables")
+        raise OpError("JMAG did not write %s (returned %r)" % (path, ok), hint)
+    head = []
+    with io.open(path, encoding="utf-8", errors="replace") as f:
+        for _ in range(4):
+            line = f.readline()
+            if not line:
+                break
+            head.append(line.rstrip()[:300])
+    return {"path": path, "kind": kind, "bytes": os.path.getsize(path), "returned": ok, "head": head}
+
+
+@op()
+def write_case_report(ctx, study, path, case=None, model=None):
+    """Study.WriteCaseReport(path): JMAG's case report (HTML/CSV by extension)."""
+    s = ctx.study(study, model)
+    path = os.path.abspath(path)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    before = set(os.listdir(os.path.dirname(path)))
+    with _CaseScope(ctx, s, case):
+        ok = s.WriteCaseReport(path)
+    new = sorted(set(os.listdir(os.path.dirname(path))) - before)
+    if not os.path.exists(path) and not new:
+        raise OpError("no report was written (WriteCaseReport returned %r)" % ok, "check jmag_messages")
+    return {"path": path, "returned": ok, "exists": os.path.exists(path), "new_files": new[:50],
+            "bytes": os.path.getsize(path) if os.path.isfile(path) else None}
+
+
+# --------------------------------------------------------------------------- optimisation table
+
+_ITEM_GETTERS = ("GetName", "GetParameterName", "GetItemName", "GetTitle", "GetExpression", "GetType", "GetValue",
+                 "GetWeight", "GetMin", "GetMax", "IsExpression")
+
+
+def _item_dump(obj):
+    row = {}
+    for g in _ITEM_GETTERS:
+        if hasattr(obj, g):
+            try:
+                row[g[3:] if g.startswith("Get") else g] = jsonable(getattr(obj, g)())
+            except Exception:
+                pass
+    return row
+
+
+def _opt_dump(ot):
+    out = {"parameters": [], "objectives": [], "constraints": []}
+    for i in range(ot.NumParameters()):
+        out["parameters"].append(_item_dump(ot.GetParametricItem(i)))
+    for i in range(ot.NumObjectives()):
+        out["objectives"].append(_item_dump(ot.GetObjectiveItem(i)))
+    for i in range(ot.NumExpressions()):
+        out["constraints"].append(_item_dump(ot.GetExpressionItem(i)))
+    for key, getter in (("csv_output_path", "CSVOutputPath"), ("immediate_csv_output", "IsImmediateCSVOutput"),
+                        ("stop_on_failed_case", "StopOnFailedCase"), ("num_jobs", "NumJobs"),
+                        ("simultaneous_studies", "NumSimultaneousStudies"), ("create_initial_cases", "CreateInitialCases")):
+        try:
+            out[key] = jsonable(getattr(ot, getter)())
+        except Exception:
+            pass
+    return out
+
+
+@op(read_only=True)
+def optimization_get(ctx, study, model=None):
+    """Optimisation table: design-variable ranges, objectives, constraints, CSV output settings."""
+    s = ctx.study(study, model)
+    ot = need(s.GetOptimizationTable(), "optimization table")
+    out = _opt_dump(ot)
+    out["study"] = s.GetName()
+    return out
+
+
+@op()
+def optimization_set(ctx, study, parameters=None, objectives=None, constraints=None, csv_output_path=None,
+                     immediate_csv_output=None, stop_on_failed_case=None, settings=None, model=None):
+    """Add design-variable ranges / objectives / constraints and output settings (each read back)."""
+    s = ctx.study(study, model)
+    ot = need(s.GetOptimizationTable(), "optimization table")
+    t = _dt(s)
+    applied = {"parameters": [], "objectives": [], "constraints": []}
+    for p in parameters or []:
+        idx = _param_index(t, p["name"])
+        if idx is None:
+            raise OpError("%r is not a design-table parameter" % p["name"],
+                          "add it with jmag_case_table(add_parameters=[...]) first; parameters: %s"
+                          % [x["name"] for x in _dt_params(t)])
+        pname = t.ParameterName(idx)
+        before = ot.NumParameters()
+        ot.AddParametricItem(pname)
+        item = need(ot.GetParametricItem(ot.NumParameters() - 1 if ot.NumParameters() > before else pname),
+                    "parametric range %r" % pname)
+        if "min" in p:
+            item.SetMin(float(p["min"]))
+        if "max" in p:
+            item.SetMax(float(p["max"]))
+        applied["parameters"].append(_item_dump(item))
+    for kind, adder, getter, counter in (("objectives", "AddObjectiveItem", "GetObjectiveItem", "NumObjectives"),
+                                         ("constraints", "AddExpressionItem", "GetExpressionItem", "NumExpressions")):
+        for o in (objectives if kind == "objectives" else constraints) or []:
+            getattr(ot, adder)(o["name"])
+            item = need(getattr(ot, getter)(getattr(ot, counter)() - 1), "%s item %r" % (kind, o["name"]))
+            if "title" in o:
+                item.SetTitle(o["title"])
+            if "expression" in o:
+                item.SetExpression(o["expression"])
+            if "type" in o:
+                item.SetType(o["type"])
+            if "value" in o:
+                item.SetValue(float(o["value"]))
+            if "weight" in o:
+                item.SetWeight(float(o["weight"]))
+            applied[kind].append(_item_dump(item))
+    if csv_output_path:
+        ot.SetCSVOutputPath(os.path.abspath(csv_output_path))
+    if immediate_csv_output is not None:
+        ot.SetImmediateCSVOutput(bool(immediate_csv_output))
+    if stop_on_failed_case is not None:
+        ot.SetStopOnFailedCase(bool(stop_on_failed_case))
+    for k, v in (settings or {}).items():
+        ot.SetParameter(k, v)
+        applied.setdefault("settings", {})[k] = {"set": v, "read": jsonable(ot.GetParameter(k))}
+    out = _opt_dump(ot)
+    out["applied"] = applied
+    out["study"] = s.GetName()
+    out["next"] = "start it with jmag_run_cases(study, method='optimization') (Study.RunOptimization in the runner)"
+    return out
+
+
+# --------------------------------------------------------------------------- experiment setup
+
+@op()
+def experiment_setup(ctx, study, zero_current=False, current_peak=None, phase_u_deg=None, frequency=None, rpm=None,
+                     steps=None, time_step=None, source=None, motion=None, model=None):
+    """One round trip for jmag_experiment: current source amplitude/frequency/phase, rotor speed, step control.
+
+    3-phase current sources: properties Amplitude [A peak], Frequency [Hz], PhaseU [deg] (verified names);
+    single current sources get a new sin function. Speed: AngularVelocity [rpm] of the RotationMotion condition."""
+    s = ctx.study(study, model)
+    rep = {}
+    if zero_current or current_peak is not None or frequency is not None or phase_u_deg is not None:
+        if not s.HasCircuit():
+            raise OpError("study has no circuit", "experiments drive the machine through its circuit current source")
+        c = s.GetCircuit()
+        comps = [c.GetComponent(i) for i in range(c.NumComponents())]
+        if source:
+            srcs = [x for x in comps if x.GetName() == source]
+            if not srcs:
+                raise OpError("component %r not found" % source, "components: %s" % _comp_names(c))
+        else:
+            # GetType() returns display names on 23.0, e.g. 'Three-phase Current Source' (verified)
+            srcs = [x for x in comps if "currentsource" in str(x.GetType()).lower().replace(" ", "")]
+        if not srcs:
+            vs = [x.GetName() for x in comps if "voltagesource" in str(x.GetType()).lower().replace(" ", "")]
+            raise OpError("no current source in the circuit",
+                          "voltage-driven models (%s) cannot impose a current; build the experiment copy with "
+                          "jmag_circuit_quick(topology='three_phase_current') or pass source=<name>" % vs if vs else
+                          "add one with jmag_circuit_quick")
+        for src in srcs:
+            names = list(src.GetPropertyNames() or [])
+            if "Amplitude" in names:
+                vals = {}
+                if zero_current:
+                    vals["Amplitude"] = 0.0
+                elif current_peak is not None:
+                    vals["Amplitude"] = float(current_peak)
+                if frequency is not None and "Frequency" in names:
+                    vals["Frequency"] = float(frequency)
+                if phase_u_deg is not None and "PhaseU" in names:
+                    vals["PhaseU"] = float(phase_u_deg)
+                rep[src.GetName()] = set_props(src, vals)
+            else:
+                amp = 0.0 if zero_current else current_peak
+                if amp is None:
+                    raise OpError("current source %r has no Amplitude property; pass current_peak" % src.GetName())
+                f = {"type": "sin", "amplitude": float(amp), "frequency": float(frequency or 50.0),
+                     "phase": float(phase_u_deg or 0.0)}
+                src.SetFunction(_function(ctx.need_app(), f))
+                rep[src.GetName()] = {"function": f, "read": "functions have no read-back in the API"}
+    if rpm is not None:
+        conds = [s.GetCondition(i) for i in range(s.NumConditions())]
+        mot = [x for x in conds if (x.GetName() == motion if motion else x.GetScriptTypeName().startswith("RotationMotion"))]
+        if len(mot) != 1:
+            raise OpError("need exactly one rotation-motion condition, found %s" % [x.GetName() for x in mot],
+                          "pass motion=<condition name>; conditions: %s" % [x.GetName() for x in conds])
+        rep["motion"] = {"condition": mot[0].GetName(), "applied": set_props(mot[0], {"AngularVelocity": float(rpm)})}
+    if steps is not None or time_step is not None:
+        rep["step"] = set_step(ctx, study, steps=steps, time_step=time_step, model=model)
+    return rep
 
 
 # --------------------------------------------------------------------------- escape hatch

@@ -8,6 +8,7 @@ by pytest. Paths and PIDs are arguments; nothing here assumes a particular machi
 | `mcp_client_flow.py <pid> <study>` | status, connect, pre-check, async run + polling, results, KVL/energy checks, images, typo feedback, journal |
 | `cancel_flow2.py <project.jproj> <study>` | detached launch, long run, safe cancel protocol, recovery |
 | `motor_flow.py <pid> <study> <rpm> <f_e>` | run a prepared machine study + power-balance check |
+| `advanced_flow.py <work_dir> [--pid N] [--skip-risky]` | capabilities, design-table cases + `jmag_run_cases`, per-case results, loss study, exporters, winding, experiments, case report (writes `advanced_flow.json`) |
 | `../../examples/spm_motor/run_mcp.py <work_dir>` | complete SPM motor build from geometry script to validated torque |
 
 The self-test (`jmag_self_test` tool or `selftest.run_self_test`) is the quickest live check.
