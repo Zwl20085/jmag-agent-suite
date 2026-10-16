@@ -29,7 +29,10 @@ try {
     $dest = Join-Path $env:USERPROFILE ".claude\skills"
     New-Item -ItemType Directory -Force -Path $dest | Out-Null
     foreach ($s in Get-ChildItem ".claude\skills" -Directory) {
-      Copy-Item $s.FullName (Join-Path $dest $s.Name) -Recurse -Force
+      $target = Join-Path $dest $s.Name
+      # replace, don't merge: Copy-Item into an existing folder nests it (skill\skill) and keeps stale files
+      if (Test-Path $target) { Remove-Item -Recurse -Force $target }
+      Copy-Item $s.FullName $target -Recurse -Force
       Write-Host "Installed skill $($s.Name) -> $dest"
     }
   }
