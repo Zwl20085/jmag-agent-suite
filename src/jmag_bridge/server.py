@@ -21,8 +21,9 @@ try:  # MCP Python SDK v2
     from mcp.server.mcpserver import Image, MCPServer as _Server
 except ImportError:  # SDK v1
     from mcp.server.fastmcp import FastMCP as _Server, Image  # type: ignore
+from mcp.types import ToolAnnotations
 
-from . import health, materials, solver_monitor, winui
+from . import compare, estimate, health, materials, plotting, reporting, solver_monitor, units, winding, winui
 from .config import find_jmag, load_state, save_state, state_dir
 from .docs_index import DocsIndex
 from .worker_client import Worker, WorkerError
@@ -36,9 +37,12 @@ jmag_status -> jmag_connect -> jmag_new_project/jmag_open_project -> jmag_import
 Rules: never trust a step that returned ok=false; read error.hint and jmag_messages. Geometry is drawn outside JMAG
 (DXF for 2D, STEP for 3D). If a call times out or JMAG seems stuck, call jmag_dialogs (modal dialog?) and jmag_screenshot.
 Unknown property names: jmag_get_properties lists valid ones; jmag_docs_search searches the local JMAG manual.
+Before FEA: jmag_estimate / jmag_winding_plan / jmag_units give the expected numbers (no JMAG needed). After:
+jmag_plot, jmag_compare, jmag_make_report; jmag_inventory shows the whole project tree.
 """
 
 mcp = _Server("jmag", instructions=INSTRUCTIONS)
+READ_ONLY = ToolAnnotations(readOnlyHint=True)
 
 READ_ONLY_OPS = {"ping", "app_info", "list_parts", "get_properties", "get_equations", "find_materials", "list_conditions",
                  "circuit_summary", "calc_folder", "report", "list_results", "get_result", "study_facts"}
@@ -747,8 +751,8 @@ async def jmag_cleanup() -> dict:
     return await asyncio.to_thread(solver_monitor.cleanup_orphans)
 
 
-@mcp.tool()
-async def jmag_report(study: str, model: str | None = None) -> dict:
+@mcp.tool(annotations=READ_ONLY)
+async def jmag_solver_report(study: str, model: str | None = None) -> dict:
     """Solver report of a study: errors, warnings (e.g. nonlinear non-convergence), element count, calc folder."""
     return await run_op("report", 120, study=study, model=model)
 
@@ -884,6 +888,291 @@ async def jmag_physics_check(study: str, check: str, coil: str | None = None, pr
     return {"ok": False, "error": {"message": f"unknown check {check!r}", "hint": "kvl | energy | power_balance"}}
 
 
+# =========================================================================== hand calcs, plots, reports
+
+def _bad_input(e: Exception, hint: str) -> dict:
+    return {"ok": False, "error": {"message": str(e), "hint": hint}}
+
+
+@mcp.tool(annotations=READ_ONLY)
+async def jmag_estimate(kind: str, params: dict | None = None) -> dict:
+    """Analytic hand calculation to know the expected answer BEFORE trusting FEA (no JMAG needed).
+
+    Returns {value, unit, formula, assumptions, expected_fea_tolerance_pct, details}. A correct FEA result should
+    land within the tolerance; a larger gap means the model or the assumptions are wrong - find out which.
+    Inputs: lengths in mm, areas mm^2, B in T, currents A (peak unless named *_rms), poles = number of poles (2p).
+    kind='list' returns every kind with its parameters. Kinds and examples:
+      airgap_flux_density {"Br": 1.2, "magnet_mm": 4, "airgap_mm": 1, "carter": 1.05}
+      carter_factor {"slot_opening_mm": 2.5, "slot_pitch_mm": 12, "airgap_mm": 1}
+      winding_factor {"slots": 12, "poles": 10, "layers": 2}
+      emf_constant / torque_constant {"turns_per_phase": 80, "kw1": 0.933, "Bg": 0.9, "bore_mm": 60, "stack_mm": 50, "poles": 10}
+      torque_dq {"poles": 8, "psi_m": 0.05, "iq": 50, "id": -20, "Ld": 2e-4, "Lq": 4e-4}
+      magnetizing_inductance / dq_inductance {"turns_per_phase": 80, "kw1": 0.933, "bore_mm": 60, "stack_mm": 50,
+          "poles": 10, "g_eff_mm": 4.8, "saliency": 1.0}
+      gapped_core_inductance {"turns": 100, "core_area_mm2": 750, "gap_mm": 1, "iron_path_mm": 180, "core_dims_mm": [15, 50]}
+      tooth_yoke_flux_density {"Bg": 0.9, "bore_mm": 60, "slots": 12, "poles": 10, "tooth_width_mm": 8, "yoke_height_mm": 6}
+      slot_fill {"slot_area_mm2": 80, "conductors_per_slot": 40, "wire_diameter_mm": 0.9}
+      copper_loss {"current_rms": 10, "turns_per_phase": 80, "conductor_area_mm2": 0.64, "stack_mm": 50,
+          "end_winding_mm": 20, "temperature_C": 120}
+      electrical_frequency {"rpm": 3000, "poles": 10}
+      step_plan {"rpm": 3000, "poles": 10, "steps_per_period": 60, "periods": 2, "slots": 12}  -> jmag_set_step args
+      iron_loss_steinmetz {"kh": 0.025, "ke": 4e-5, "B": 1.5, "f": 250, "mass_kg": 2.1}
+    """
+    if kind in ("list", "help"):
+        return {"ok": True, "result": {k: estimate.signature(k) for k in estimate.KINDS}}
+    try:
+        return {"ok": True, "result": estimate.run(kind, params)}
+    except (ValueError, TypeError) as e:
+        return _bad_input(e, "fix the parameter named in the message; jmag_estimate(kind='list') shows every kind's parameters")
+
+
+@mcp.tool(annotations=READ_ONLY)
+async def jmag_units(convert: str, value: float, from_unit: str, to_unit: str, poles: int | None = None,
+                     base: float | None = None) -> dict:
+    """Convert a value between engineering units (pure, no JMAG).
+
+    convert: quantity - speed | length | flux_density | angle | area | per_unit | auto (detect from from_unit).
+    Units: speed rpm, rad/s, rps (mechanical) and Hz, rad/s_e (electrical, need poles); length m, cm, mm, um, in;
+    flux_density T, mT, G, kG; angle deg, rad (mechanical), deg_e, rad_e (electrical, need poles);
+    area m2, cm2, mm2, kcmil, AWG; per_unit SI <-> pu with base=<base value>.
+    Examples: (speed, 3000, 'rpm', 'Hz', poles=8) -> 200 Hz electrical; (area, 18, 'AWG', 'mm2') -> 0.823;
+    (angle, 15, 'deg', 'deg_e', poles=8) -> 60.
+    """
+    try:
+        res = units.convert(value, from_unit, to_unit, poles=poles, base=base)
+        if convert not in ("auto", "") and convert != res["quantity"]:
+            raise ValueError(f"{from_unit} is a {res['quantity']} unit, not {convert}")
+        return {"ok": True, "result": res}
+    except ValueError as e:
+        return _bad_input(e, "check the unit spelling (see this tool's description) and pass poles for electrical units")
+
+
+@mcp.tool(annotations=READ_ONLY)
+async def jmag_winding_plan(slots: int, poles: int, phases: int = 3, layers: int = 2, coil_pitch: int | None = None,
+                            turns: int | None = None, parallel_paths: int = 1) -> dict:
+    """Winding layout from slot/pole/phase numbers (star of slots; pure, no JMAG).
+
+    Checks feasibility (balanced: Q/(m*gcd(Q,p)) integer), then returns: slot_map (slot, layer a/b, phase, sign,
+    direction up/down, suggested part name Slot<kk>_<phase><+|-> - double layer adds a/b: Slot01a_U+),
+    coil_list, kw1 and winding factors per harmonic, MMF harmonic table (sub-harmonics show up as order < pp),
+    symmetry sector (smallest model: periodic/anti-periodic), and labels_coils in the labels-JSON shape of the
+    jmag-geometry skill ({"U": {"up": [...], "down": [...]}}) ready for jmag_add_fem_coil sides.
+    turns = turns per coil -> series turns per phase for the circuit Coil component.
+    coil_pitch defaults to round(Q/poles) (1 = tooth coils). Examples: 12s/10p double layer kw1=0.933;
+    24s/4p full pitch kw1=0.966; 9s/8p kw1=0.945.
+    """
+    try:
+        return {"ok": True, "result": winding.plan(slots, poles, phases, layers, coil_pitch, turns, parallel_paths)}
+    except ValueError as e:
+        return _bad_input(e, "pick a feasible combination (the message names the rule) or change layers/coil_pitch")
+
+
+@mcp.tool()
+async def jmag_plot(kind: str, data: dict | None = None, csv_path: str | None = None, study: str | None = None,
+                    table: str | None = None, x: str | None = None, y: list[str] | None = None, out: str | None = None,
+                    title: str | None = None, electrical_frequency_hz: float | None = None,
+                    model: str | None = None) -> list:
+    """PNG plot rendered by the server, returned as an image plus the plotted numbers (so you can check them
+    without vision). Needs matplotlib: pip install "jmag-mcp-bridge[plots]".
+
+    kind: waveform (lines vs time, mean/rms annotated) | fft (harmonic bars of one period; give
+    electrical_frequency_hz to cut out the last electrical period) | sweep (x vs y with markers) |
+    map (2D grid with contour lines, e.g. efficiency) | torque_speed (envelope + power, base speed annotated).
+    Source - exactly one of:
+      data = {"x": [...], "series": {"Torque": [...]}} (what jmag_get_result returns; "columns" also accepted)
+             map: {"x": [...], "y": [...], "z": [[row per y]], "x_label", "y_label", "z_label"}
+      csv_path = a CSV with a header row, first column = x (jmag_export_results files work)
+      study + table = read a result table from JMAG directly (full resolution, e.g. table='Torque')
+    x: use this series as the x axis (sweeps, torque_speed); y: series to plot (default all). out: PNG path.
+    """
+    if sum(v is not None for v in (data, csv_path, study)) != 1:
+        return with_image(_bad_input(ValueError("pass exactly one of data, csv_path or study(+table)"),
+                                     "e.g. jmag_plot(kind='waveform', study='Load', table='Torque')"))
+    if study is not None:
+        if not table:
+            return with_image(_bad_input(ValueError("study needs table"), "list tables with jmag_list_results"))
+        cols = (list(y) + ([x] if x else [])) if y else None
+        env = await run_op("get_result", 300, study=study, table=table, columns=cols, model=model)
+        if not env["ok"]:
+            return with_image(env)
+        data = env["result"]
+    elif csv_path is not None:
+        try:
+            data = plotting.load_csv(csv_path)
+        except (OSError, ValueError) as e:
+            return with_image(_bad_input(e, "the CSV needs a header row and numeric columns; first column = x"))
+    path = out_path(f"plot_{kind}", out)
+    try:
+        res = await asyncio.to_thread(plotting.plot, kind, data or {}, path, x, y, title, electrical_frequency_hz)
+    except plotting.PlottingUnavailable as e:
+        return with_image(_bad_input(e, plotting.INSTALL_HINT))
+    except (ValueError, TypeError, KeyError) as e:
+        return with_image(_bad_input(e, "check kind, x/y series names and the data shape in this tool's description"))
+    res["source"] = {"study": study, "table": table} if study else ({"csv": csv_path} if csv_path else "data")
+    return with_image({"ok": True, "result": res})
+
+
+def _setup_table(f: dict) -> dict:
+    step = f.get("step") or {}
+    circ = f.get("circuit") or {}
+    comps = (circ.get("components") or []) if circ.get("has_circuit") else []
+    return {
+        "model": f.get("model"), "type": f.get("type"), "dimension": f.get("dimension"),
+        "stack length (ModelThickness)": f.get("model_thickness"), "length unit": f.get("length_unit"),
+        "mesh elements": f.get("elements"),
+        "materials": {p["name"]: p.get("material") for p in f.get("parts", [])},
+        "conditions": [f"{c['name']} ({c['type']})" for c in f.get("conditions", [])],
+        "circuit components": [f"{k['name']} ({k['type']})" for k in comps],
+        "steps": {k: step[k] for k in ("Step", "StepType", "TimeStep", "EndPoint") if k in step} or None,
+        "has result": f.get("has_result"),
+    }
+
+
+async def _report_study(study: str, model: str | None, f_e: float | None, include_images: bool) -> dict:
+    s: dict = {"name": study, "images": []}
+    facts = await _facts(study, model)
+    if not facts["ok"]:
+        s["error"] = (facts.get("error") or {}).get("message", "study_facts failed")
+        return s
+    f = facts["result"]
+    s["setup"] = _setup_table(f)
+    s["precheck"] = health.summarize(health.preflight(f, f_e))
+    if f.get("has_result"):
+        post = await _post(study, model, f_e)
+        s["health"], s["convergence"], s["result_summary"] = post["health"], post["convergence"], post["result_summary"]
+    if include_images:
+        if f.get("has_result"):
+            c = await run_op("contour_image", 300, study=study, path=out_path("contour", None), model=model)
+            if c["ok"]:
+                s["images"].append(c["result"]["path"])
+        if (f.get("circuit") or {}).get("has_circuit"):
+            c = await run_op("circuit_image", 120, study=study, path=out_path("circuit", None), model=model)
+            if c["ok"]:
+                s["images"].append(c["result"]["path"])
+    return s
+
+
+@mcp.tool()
+async def jmag_make_report(title: str, studies: list[str], out_dir: str, include_images: bool = True,
+                           notes: str | list[str] | None = None, electrical_frequency_hz: float | None = None,
+                           invariants: dict | None = None, sweeps: list[dict] | None = None,
+                           doubts: list[str] | None = None, model: str | None = None) -> dict:
+    """Write a self-contained Markdown report folder (report.md + images/ + replay.py) for one or more studies.
+
+    Per study: setup table (type, stack length, mesh, materials, conditions, circuit, steps), pre-run and
+    post-run verdicts with EVERY error/warning finding (FAIL/CHECK blocks are never omitted), convergence,
+    result statistics (each number names its table/column), contour and circuit images when include_images.
+    invariants: {study: [results of jmag_physics_check, e.g. {"check": "kvl", "ok": true, ...}]} - run the checks
+    first and pass them in. sweeps: [{"title", "columns": [...], "rows": [[...]], "study": <name, optional>}].
+    notes / doubts: free text; doubts are merged with automatic ones (unchecked studies, failed invariants).
+    The reproduction appendix and replay.py come from this session's journal. out_dir: a folder outside the repo.
+    """
+    rows = []
+    for st in studies:
+        s = await _report_study(st, model, electrical_frequency_hz, include_images)
+        s["invariants"] = (invariants or {}).get(st, [])
+        s["sweeps"] = [w for w in (sweeps or []) if w.get("study") == st or (len(studies) == 1 and not w.get("study"))]
+        rows.append(s)
+    if include_images and rows:
+        m = await run_op("model_image", 120, path=out_path("model", None))
+        if m["ok"]:
+            rows[0]["images"].insert(0, m["result"]["path"])
+    placed = {id(w) for s in rows for w in s.get("sweeps", [])}
+    loose = [w for w in (sweeps or []) if id(w) not in placed]
+    try:
+        res = await asyncio.to_thread(reporting.build_report, out_dir, title, rows, notes, include_images,
+                                      _journal_rows(True), B.install, doubts, loose)
+    except OSError as e:
+        return _bad_input(e, "choose a writable out_dir outside the repository")
+    return {"ok": True, "result": res}
+
+
+@mcp.tool(annotations=READ_ONLY)
+async def jmag_compare(study_a: str, study_b: str, tables: list[str] | None = None, threshold_pct: float = 1.0,
+                       model: str | None = None, model_b: str | None = None) -> dict:
+    """Compare two studies (mesh refinement, design variant, before/after a fix): setup differences that could
+    explain a result change (stack length, mesh, materials, condition/circuit properties, steps, equations,
+    analysis-control properties) and result statistics side by side with deltas in %.
+
+    tables: result tables to compare (default: all tables both studies have). threshold_pct: deltas at or above
+    this are listed under results.significant. A < 1-2 % torque change after mesh refinement = mesh-converged.
+    model_b: model of study_b when it differs from model.
+    """
+    side = {}
+    for key, st, mdl in (("a", study_a, model), ("b", study_b, model_b or model)):
+        f = await _facts(st, mdl)
+        if not f["ok"]:
+            return f
+        target = {"study": st, "kind": "study", **({"model": mdl} if mdl else {})}
+        p = await run_op("get_properties", 120, target=target)
+        flat = compare.flatten_facts(f["result"])
+        flat.update(compare.flatten_properties((p.get("result") or {}).get("properties", [])))
+        side[key] = {"flat": flat, "has_result": f["result"].get("has_result"), "study": st, "model": mdl}
+    out: dict = {"a": study_a, "b": study_b, "setup_diff": compare.diff_flat(side["a"]["flat"], side["b"]["flat"])}
+    if not (side["a"]["has_result"] and side["b"]["has_result"]):
+        out["results"] = None
+        out["hint"] = "one or both studies have no results; run them (jmag_run) to compare numbers"
+        return {"ok": True, "result": out}
+    names: dict = {}
+    for key in ("a", "b"):
+        lr = await run_op("list_results", 120, study=side[key]["study"], model=side[key]["model"])
+        names[key] = [t["name"] for t in (lr.get("result") or {}).get("tables", [])]
+    common = [n for n in names["a"] if n in names["b"]]
+    wanted = [t for t in (tables or common) if t in common]
+    stats: dict = {"a": {}, "b": {}}
+    for key in ("a", "b"):
+        for t in wanted:
+            r = await run_op("get_result", 300, study=side[key]["study"], table=t, model=side[key]["model"])
+            if r["ok"]:
+                stats[key][t] = {c: health.waveform_stats(v) for c, v in r["result"]["columns"].items()}
+    res = compare.compare_results(stats["a"], stats["b"], threshold_pct)
+    res["not_compared"] = sorted(set(names["a"]) ^ set(names["b"]))
+    if tables:
+        res["missing_requested"] = [t for t in tables if t not in common]
+    out["results"] = res
+    return {"ok": True, "result": out}
+
+
+@mcp.tool(annotations=READ_ONLY)
+async def jmag_inventory() -> dict:
+    """Whole project tree: project path, models (dimension, part count) -> studies (type, solved, condition count
+    and types, result-table count, calc folder). Flags unsolved studies and studies without conditions.
+    Superset of jmag_summary; use it first in a project you did not build."""
+    info = await run_op("app_info", 60)
+    if not info["ok"]:
+        return info
+    r = info["result"]
+    models = []
+    for m in r.get("models", []):
+        studies = []
+        for st in m.get("studies", []):
+            studies.append(await _inventory_study(st, m["name"]))
+        models.append({"name": m["name"], "dimension": m.get("dimension"), "parts": m.get("parts"), "studies": studies})
+    return {"ok": True, "result": {"project_path": r.get("project_path"), "project_name": r.get("project_name"),
+                                   "version": r.get("version"), "models": models,
+                                   "flags": compare.inventory_flags(models)}}
+
+
+async def _inventory_study(st: dict, model: str) -> dict:
+    row = {"name": st["name"], "type": st.get("type"), "solved": bool(st.get("has_result"))}
+    lc = await run_op("list_conditions", 60, study=st["name"], model=model)
+    if lc["ok"]:
+        conds = lc["result"]["conditions"]
+        row["conditions"] = len(conds)
+        row["condition_types"] = sorted({c["type"] for c in conds})
+    else:
+        row["error"] = (lc.get("error") or {}).get("message")
+    cf = await run_op("calc_folder", 60, study=st["name"], model=model)
+    if cf["ok"]:
+        row["calc_folder"] = cf["result"].get("folder")
+        row["solved"] = row["solved"] or bool(cf["result"].get("has_result"))
+    if row["solved"]:
+        lr = await run_op("list_results", 120, study=st["name"], model=model)
+        if lr["ok"]:
+            row["result_tables"] = len(lr["result"]["tables"])
+    return row
+
+
 # =========================================================================== knowledge
 
 @mcp.tool()
@@ -940,10 +1229,7 @@ async def jmag_self_test(keep_open: bool = False, work_dir: str | None = None) -
     return await asyncio.to_thread(run_self_test, B.install, keep_open, work_dir)
 
 
-@mcp.tool()
-async def jmag_journal(export_script: str | None = None, session_only: bool = True) -> dict:
-    """Show the log of state-changing operations; export_script=path writes a replayable Python script
-    (runs with JMAG's bundled Python) that reproduces the session - a reproducible record of the model build."""
+def _journal_rows(session_only: bool = True) -> list[dict]:
     rows = []
     if B.journal.is_file():
         for line in B.journal.read_text(encoding="utf-8").splitlines():
@@ -953,6 +1239,14 @@ async def jmag_journal(export_script: str | None = None, session_only: bool = Tr
                 continue
             if not session_only or r.get("session") == B.session:
                 rows.append(r)
+    return rows
+
+
+@mcp.tool()
+async def jmag_journal(export_script: str | None = None, session_only: bool = True) -> dict:
+    """Show the log of state-changing operations; export_script=path writes a replayable Python script
+    (runs with JMAG's bundled Python) that reproduces the session - a reproducible record of the model build."""
+    rows = _journal_rows(session_only)
     out: dict = {"ok": True, "entries": len(rows), "last": rows[-30:]}
     if export_script:
         from .replay import write_replay_script
