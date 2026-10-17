@@ -1380,11 +1380,7 @@ class _CaseScope(object):
     def __enter__(self):
         if self.case is None:
             return self
-        n = self.s.GetDesignTable().NumCases()
-        c = int(self.case)
-        if c < 0 or c >= n:
-            raise OpError("case %s out of range; study %r has %d case(s) (0..%d)" % (c, self.s.GetName(), n, n - 1),
-                          "list cases with jmag_case_table(action='get')")
+        c = _check_case(self.s, self.case)
         if self.ctx.app.HasRunningProcess():
             raise OpError("JMAG is running a solve; switching the current case now could disturb it",
                           "read per-case results after jmag_run_status reports finished")
@@ -1399,8 +1395,19 @@ class _CaseScope(object):
         return False
 
 
+def _check_case(s, case):
+    """Validate a 0-based design-table case index before any call that takes it (CaseHasResult on an
+    out-of-range case logs a JMAG error)."""
+    n = s.GetDesignTable().NumCases()
+    c = int(case)
+    if c < 0 or c >= n:
+        raise OpError("case %s out of range; study %r has %d case(s) (0..%d)" % (c, s.GetName(), n, n - 1),
+                      "list cases with jmag_case_table(action='get')")
+    return c
+
+
 def _need_result(s, case=None):
-    has = s.CaseHasResult(int(case)) if case is not None else s.HasResult()
+    has = s.CaseHasResult(_check_case(s, case)) if case is not None else s.HasResult()
     if not has:
         where = "case %s of study %r" % (case, s.GetName()) if case is not None else "study %r" % s.GetName()
         raise OpError("%s has no results" % where, "run it first (jmag_run, or jmag_run_cases for design-table cases)")
@@ -1548,9 +1555,14 @@ def contour_image(ctx, study, path, result_type="MagneticFluxDensity", component
 
 
 @op()
-def model_image(ctx, path, width=1400, height=1000, show_mesh=False):
-    """PNG of the current model view (geometry or mesh)."""
+def model_image(ctx, path, width=1400, height=1000, show_mesh=False, model=None):
+    """PNG of the current model view (geometry or mesh); model=<name> makes that model current first."""
     app = ctx.need_app()
+    if model is not None and model != "":
+        m = ctx.model(model)
+        for i in range(app.NumModels()):  # by name, as contour_image does (no missing-name probe)
+            if app.GetModel(i).GetName() == m.GetName():
+                app.SetCurrentModel(i)
     v = app.View()
     v.SetContourView(False)
     # before any result exists JMAG logs "The contour is not available to show" for the call above
@@ -1832,11 +1844,41 @@ def case_table_set(ctx, study, add_parameters=None, cases=None, set_cases=None, 
     report = {"added_parameters": [], "new_cases": [], "changed_cases": [], "removed_cases": [], "active": {}}
     # validate everything that can be validated before changing anything
     full = [(_resolve_addable(t, p) if _param_index(t, p) is None else None, p) for p in (add_parameters or [])]
+    pending = set()  # names that will resolve once add_parameters has been applied
+    for name, orig in full:
+        if name is not None:
+            pending.update((name, _short_param(name), orig))
+
+    def _unknown(values):
+        return [k for k in values if k not in pending and _param_index(t, k) is None]
+
+    def _param_hint():
+        return ("add them with add_parameters; parameters: %s"
+                % ([p["name"] for p in _dt_params(t)] + sorted(n for n, _ in full if n is not None)))
+
     n0 = t.NumCases()
+    for values in cases or []:
+        missing = _unknown(values)
+        if missing:
+            raise OpError("unknown parameter(s) %s in a new case" % missing, _param_hint())
     for row in set_cases or []:
         c = int(row["case"])
         if c < 0 or c >= n0:
             raise OpError("case %s out of range (0..%d)" % (c, n0 - 1))
+        missing = _unknown(row.get("values") or {})
+        if missing:
+            raise OpError("unknown parameter(s) %s in set_cases for case %s" % (missing, c), _param_hint())
+    n_added = n0 + len(cases or [])
+    removes = sorted(set(int(x) for x in (remove_cases or [])), reverse=True)
+    bad = [c for c in removes if c < 0 or c >= n_added]
+    if bad:
+        raise OpError("remove_cases %s out of range (0..%d after appending new cases)" % (sorted(bad), n_added - 1))
+    n_final = n_added - len(removes)
+    bad = [k for k in (active or {}) if int(k) < 0 or int(k) >= n_final]
+    if bad:
+        raise OpError("active case(s) %s out of range (0..%d after adds/removals)" % (bad, n_final - 1))
+    if current_case is not None and not 0 <= int(current_case) < n_final:
+        raise OpError("current_case %s out of range (0..%d after adds/removals)" % (current_case, n_final - 1))
     for name, orig in full:
         if name is None:
             report["added_parameters"].append({"name": orig, "state": "already present"})
@@ -1860,7 +1902,7 @@ def case_table_set(ctx, study, add_parameters=None, cases=None, set_cases=None, 
         _set_case_values(t, before, values, report["new_cases"])
     for row in set_cases or []:
         _set_case_values(t, int(row["case"]), row.get("values") or {}, report["changed_cases"])
-    for c in sorted(set(int(x) for x in (remove_cases or [])), reverse=True):
+    for c in removes:
         before = t.NumCases()
         if c < 0 or c >= before:
             raise OpError("case %s out of range (0..%d)" % (c, before - 1), data=report)
@@ -1931,17 +1973,17 @@ def run_cases(ctx, study, cases=None, overwrite=True, method="loop", progress_fi
         _write_progress(progress_file, state)
         return out
     if method == "all_cases":
+        has = [c for c in sel if s.CaseHasResult(c)]
+        if has and not overwrite:  # checked for every case before anything is touched
+            raise OpError("case(s) %s already have results" % has, "pass overwrite=true or choose other cases")
         old = [bool(t.IsActive(c)) for c in range(n)]
-        for c in range(n):
-            t.SetActive(c, 1 if c in sel else 0)
-        for c in sel:
-            if s.CaseHasResult(c):
-                if not overwrite:
-                    raise OpError("case %s already has results" % c, "pass overwrite=true or choose other cases")
-                s.DeleteResultCase(c)
-        state["folder"] = _calc_folder_of(s)
-        _write_progress(progress_file, state)
         try:
+            for c in range(n):
+                t.SetActive(c, 1 if c in sel else 0)
+            for c in has:
+                s.DeleteResultCase(c)
+            state["folder"] = _calc_folder_of(s)
+            _write_progress(progress_file, state)
             s.RunAllCases()
         finally:
             for c in range(n):
@@ -2006,11 +2048,34 @@ def create_loss_study(ctx, study, name, parts=None, frequency_hz=None, reference
     if not (stype.startswith("Transient") or stype.startswith("Frequency")):
         raise OpError("iron-loss studies are derived from a Transient (or Frequency) study, not %s" % stype,
                       "create it from the solved Transient2D/Transient study")
+    if name == s.GetName():
+        raise OpError("the loss study cannot replace its own source study %r" % name, "choose another name")
+    vals = {}
+    if frequency_hz is not None:
+        try:
+            vals["BasicFrequency"] = float(frequency_hz)
+        except (TypeError, ValueError):
+            raise OpError("frequency_hz must be a number, got %r" % (frequency_hz,))
+    if reference_steps:
+        if not isinstance(reference_steps, (list, tuple)) or len(reference_steps) != 2:
+            raise OpError("reference_steps must be [start_step, end_step], got %r" % (reference_steps,))
+        try:
+            a, b = int(reference_steps[0]), int(reference_steps[1])
+        except (TypeError, ValueError):
+            raise OpError("reference_steps must be two integers, got %r" % (reference_steps,))
+        if a < 0 or b <= a:
+            raise OpError("reference_steps %r: need 0 <= start < end" % ([a, b],))
+        vals.update({"UseStartReferenceStep": 1, "StartReferenceStep": a, "UseEndReferenceStep": 1, "EndReferenceStep": b})
+    if properties is not None and not isinstance(properties, dict):
+        raise OpError("properties must be an object {name: value}")
+    if study_properties is not None and not isinstance(study_properties, dict):
+        raise OpError("study_properties must be an object {name: value}")
+    vals.update(properties or {})
     existing = [m.GetStudy(j).GetName() for j in range(m.NumStudies())]
     if name in existing:
         if not replace:
             raise OpError("study %r already exists" % name, "pass replace=true or choose another name")
-        m.DeleteStudy(name)
+        m.DeleteStudy(name)  # last step before creation, after everything else is validated
     ls = need(s.CreateLossStudy(name), "loss study %r" % name)
     cond = None
     for i in range(ls.NumConditions()):
@@ -2021,13 +2086,6 @@ def create_loss_study(ctx, study, name, parts=None, frequency_hz=None, reference
     if cond is None:  # 23.0 creates 'untitled 1' (Ironloss) by itself; create one if a later version does not
         _check_type(ls, "Ironloss")
         cond = need(ls.CreateCondition("Ironloss", "IronLoss"), "Ironloss condition")
-    vals = {}
-    if frequency_hz is not None:
-        vals["BasicFrequency"] = float(frequency_hz)
-    if reference_steps:
-        a, b = int(reference_steps[0]), int(reference_steps[1])
-        vals.update({"UseStartReferenceStep": 1, "StartReferenceStep": a, "UseEndReferenceStep": 1, "EndReferenceStep": b})
-    vals.update(properties or {})
     applied = set_props(cond, vals) if vals else {}
     sel = select_parts(cond, m, parts) if parts else []
     sp_applied = set_props(ls.GetStudyProperties(), study_properties) if study_properties else {}
@@ -2108,14 +2166,15 @@ EFF_MAP_SETTINGS = {
     "add_pwm_iron_loss": ("SetAddPWMIronLoss", "AddPWMIronLoss"),
     "dc_bus_voltage": ("SetDCBusVoltage", "DCBusVoltage"),
     "carrier_frequency": ("SetCarrierFrequency", "CarrierFrequency"),
+    # the API mixes getter styles: these three really are Get-prefixed (23.0 member list)
     "add_magnet_loss": ("SetAddMagnetLoss", "GetAddMagnetLoss"),
     "add_ac_loss": ("SetAddACLoss", "AddACLoss"),
     "extrapolation": ("SetExtrapolation", "GetExtrapolation"),
     "cluster_points": ("SetClusterPoints", "ClusterPoints"),
     "loss_correction": ("SetLossCorrection", "GetLossCorrection"),
-    "coil_temperature_correction": ("SetCoilTemperatureCorrection", None),
-    "magnet_temperature_correction": ("SetMagnetTemperatureCorrection", None),
-    "magnet_correction_base_temperature": ("SetMagnetCorrectionBaseTemperature", None),
+    "coil_temperature_correction": ("SetCoilTemperatureCorrection", "GetCoilTemperatureCorrection"),
+    "magnet_temperature_correction": ("SetMagnetTemperatureCorrection", "GetMagnetTemperatureCorrection"),
+    "magnet_correction_base_temperature": ("SetMagnetCorrectionBaseTemperature", "GetMagnetCorrectionBaseTemperature"),
 }
 
 
@@ -2301,19 +2360,38 @@ def winding_apply(ctx, study, coils, mode="fem_coil", name="Phase", components=N
         if c.get("turns") is not None:
             turns[ph] += float(c["turns"])
     if mode == "fem_coil":
+        # validate every phase (circuit components, turns, existing conditions) before creating anything
+        _check_type(s, "FEMCoil")
         circ = _get_circuit(s, create=False)
         have = _comp_names(circ)
-        out = {"mode": mode, "phases": {}}
+        pt = dict((str(k), v) for k, v in (phase_turns or {}).items())
+        extra = [k for k in pt if k not in groups]
+        if extra:
+            raise OpError("phase_turns names unknown phase(s) %s" % extra, "phases in coils: %s" % phases)
+        plan = []
         for ph in phases:
             comp = (components or {}).get(ph) or "Coil%s" % ph
             if comp not in have:
                 raise OpError("circuit has no component %r for phase %s" % (comp, ph),
                               "components: %s. Build the circuit first (jmag_circuit_quick) or pass components={'%s': ...}"
                               % (have, ph))
-            sides = [{"parts": groups[ph][d], "direction": d} for d in ("up", "down") if groups[ph][d]]
-            n_turns = (phase_turns or {}).get(ph)
-            if n_turns is None and turns[ph] > 0:
+            n_turns = pt.get(ph)
+            if n_turns is not None:
+                try:
+                    n_turns = float(n_turns)
+                except (TypeError, ValueError):
+                    n_turns = -1.0
+                if not n_turns > 0:
+                    raise OpError("phase_turns[%r] must be a positive number" % ph)
+            elif turns[ph] > 0:
                 n_turns = turns[ph] / 2.0
+            cname = "%s%s" % (name, ph)
+            if not replace and _find_condition(s, cname) is not None:
+                raise OpError("condition %r already exists" % cname, "pass replace=true")
+            sides = [{"parts": groups[ph][d], "direction": d} for d in ("up", "down") if groups[ph][d]]
+            plan.append((ph, comp, n_turns, sides))
+        out = {"mode": mode, "phases": {}}
+        for ph, comp, n_turns, sides in plan:
             res = _fem_group(ctx, study, "FEMCoil", "FEMCoilData", "%s%s" % (name, ph), comp, sides,
                              {"Turn": n_turns} if n_turns else None, replace, model)
             out["phases"][ph] = {"condition": "%s%s" % (name, ph), "component": comp, "turns": n_turns,
@@ -2383,22 +2461,28 @@ def export_table(ctx, study, path, kind="all_tables", table=None, result_type=No
     path = os.path.abspath(path)
     if os.path.splitext(path)[1].lower() not in (".csv", ".txt", ".htm", ".html"):
         raise OpError("path must end with .csv, .txt or .htm", "JMAG picks the format from the extension")
-    if os.path.exists(path):
-        if not overwrite:
-            raise OpError("%s exists" % path, "pass overwrite=true")
-        os.remove(path)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if os.path.exists(path) and not overwrite:
+        raise OpError("%s exists" % path, "pass overwrite=true")
+    if kind == "table" and table is None:
+        raise OpError("kind='table' needs table=<name>", "names: jmag_list_results")
     _need_result(s, case)
+
+    def _clear():  # only after everything else is validated, right before JMAG writes
+        if os.path.exists(path):
+            os.remove(path)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+
     ok = None
     with _CaseScope(ctx, s, case):
         if kind == "all_tables":
+            _clear()
             s.GetResultTable().WriteAllTables(path, axis)
         elif kind == "all_cases":
+            _clear()
             s.GetResultTable().WriteAllCaseTables(path, axis)
         elif kind == "table":
-            if table is None:
-                raise OpError("kind='table' needs table=<name>", "names: jmag_list_results")
             d, _ = _table_data(s, table)
+            _clear()
             d.WriteTable(path, axis)
         else:
             td = need(s.CreateTableDefinition(), "table definition")
@@ -2416,6 +2500,7 @@ def export_table(ctx, study, path, kind="all_tables", table=None, result_type=No
                 td.SetAllSteps()
             else:
                 td.SetStepsByString(str(steps))
+            _clear()
             if kind == "field":
                 ok = s.ExportTable(td, path, filetype)
             elif kind == "field_values":
@@ -2566,6 +2651,18 @@ def experiment_setup(ctx, study, zero_current=False, current_peak=None, phase_u_
     single current sources get a new sin function. Speed: AngularVelocity [rpm] of the RotationMotion condition."""
     s = ctx.study(study, model)
     rep = {}
+    mot = None
+    if rpm is not None:  # resolve the motion condition before touching any source
+        try:
+            rpm = float(rpm)
+        except (TypeError, ValueError):
+            raise OpError("rpm must be a number, got %r" % (rpm,))
+        conds = [s.GetCondition(i) for i in range(s.NumConditions())]
+        mot = [x for x in conds if (x.GetName() == motion if motion else x.GetScriptTypeName().startswith("RotationMotion"))]
+        if len(mot) != 1:
+            raise OpError("need exactly one rotation-motion condition, found %s" % [x.GetName() for x in mot],
+                          "pass motion=<condition name>; conditions: %s" % [x.GetName() for x in conds])
+        mot = mot[0]
     if zero_current or current_peak is not None or frequency is not None or phase_u_deg is not None:
         if not s.HasCircuit():
             raise OpError("study has no circuit", "experiments drive the machine through its circuit current source")
@@ -2584,8 +2681,11 @@ def experiment_setup(ctx, study, zero_current=False, current_peak=None, phase_u_
                           "voltage-driven models (%s) cannot impose a current; build the experiment copy with "
                           "jmag_circuit_quick(topology='three_phase_current') or pass source=<name>" % vs if vs else
                           "add one with jmag_circuit_quick")
-        for src in srcs:
-            names = list(src.GetPropertyNames() or [])
+        plan = [(src, list(src.GetPropertyNames() or [])) for src in srcs]
+        for src, names in plan:
+            if "Amplitude" not in names and not zero_current and current_peak is None:
+                raise OpError("current source %r has no Amplitude property; pass current_peak" % src.GetName())
+        for src, names in plan:
             if "Amplitude" in names:
                 vals = {}
                 if zero_current:
@@ -2599,19 +2699,12 @@ def experiment_setup(ctx, study, zero_current=False, current_peak=None, phase_u_
                 rep[src.GetName()] = set_props(src, vals)
             else:
                 amp = 0.0 if zero_current else current_peak
-                if amp is None:
-                    raise OpError("current source %r has no Amplitude property; pass current_peak" % src.GetName())
                 f = {"type": "sin", "amplitude": float(amp), "frequency": float(frequency or 50.0),
                      "phase": float(phase_u_deg or 0.0)}
                 src.SetFunction(_function(ctx.need_app(), f))
                 rep[src.GetName()] = {"function": f, "read": "functions have no read-back in the API"}
-    if rpm is not None:
-        conds = [s.GetCondition(i) for i in range(s.NumConditions())]
-        mot = [x for x in conds if (x.GetName() == motion if motion else x.GetScriptTypeName().startswith("RotationMotion"))]
-        if len(mot) != 1:
-            raise OpError("need exactly one rotation-motion condition, found %s" % [x.GetName() for x in mot],
-                          "pass motion=<condition name>; conditions: %s" % [x.GetName() for x in conds])
-        rep["motion"] = {"condition": mot[0].GetName(), "applied": set_props(mot[0], {"AngularVelocity": float(rpm)})}
+    if mot is not None:
+        rep["motion"] = {"condition": mot.GetName(), "applied": set_props(mot, {"AngularVelocity": rpm})}
     if steps is not None or time_step is not None:
         rep["step"] = set_step(ctx, study, steps=steps, time_step=time_step, model=model)
     return rep

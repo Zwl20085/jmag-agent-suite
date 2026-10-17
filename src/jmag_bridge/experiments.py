@@ -193,9 +193,36 @@ def _estimate(params: dict) -> dict | None:
         return {"error": str(e)}
 
 
-async def _table(call: Call, study: str, names: Sequence[str], model: str | None, columns=None) -> dict | None:
+#: JMAG internal result keys -> the display names jmag_list_results reports (result-keys.md, verified 23.0)
+DISPLAY_NAMES = {"FEMCoilFlux": "Coil Flux-Linkage", "LineCurrent": "Circuit Current", "TerminalVoltage": "Circuit Voltage"}
+
+
+async def _list_tables(call: Call, study: str, model: str | None) -> list[dict]:
+    env = await call("list_results", 120, study=study, model=model)
+    if not env.get("ok"):
+        return []
+    return list((env.get("result") or {}).get("tables") or [])
+
+
+async def _table(call: Call, study: str, names: Sequence[str], model: str | None, columns=None,
+                 tables: list[dict] | None = None) -> dict | None:
+    """First of ``names`` that the study really has, read with get_result.
+
+    Picks from the list_results names instead of trying each candidate with get_result: a missing name falls
+    through to ResultTable.GetDataFromName, which makes JMAG log an error (a probe)."""
+    if tables is None:
+        tables = await _list_tables(call, study, model)
+    by_key: dict[str, dict] = {}
+    for r in tables:
+        for k in (r.get("name"), r.get("title")):
+            if k:
+                by_key.setdefault(str(k).strip().lower(), r)
     for n in names:
-        env = await call("get_result", 300, study=study, table=n, columns=columns, model=model)
+        r = by_key.get(str(n).strip().lower()) or by_key.get(DISPLAY_NAMES.get(n, "").lower())
+        if r is None:
+            continue
+        env = await call("get_result", 300, study=study, table=r.get("name") or r.get("title"), columns=columns,
+                         model=model)
         if env.get("ok"):
             return env["result"]
     return None
@@ -208,8 +235,11 @@ async def _prepare(call: Call, kind: str, study: str, params: dict, model: str |
     f_e = electrical_frequency(rpm, poles)
     if kind == "cogging":
         _need(params, "slots")
-        span = cogging_period_deg(int(params["slots"]), poles) * float(params.get("periods", 1))
-        plan = step_plan_for_span(rpm, span, int(params.get("steps_per_span", 90)))
+        periods = float(params.get("periods", 1))
+        spp = int(params.get("steps_per_span", 90))  # samples per cogging period (analyze windows one period)
+        span = cogging_period_deg(int(params["slots"]), poles) * periods
+        plan = step_plan_for_span(rpm, span, int(round(spp * periods)))
+        plan["steps_per_span"] = spp
         zero, amp = True, None
     else:
         periods = float(params.get("periods", 1 if kind == "back_emf" else 2))
@@ -235,8 +265,13 @@ async def analyze(call: Call, kind: str, study: str, params: dict, model: str | 
     rpm = float(params.get("rpm") or (60.0 if kind == "cogging" else 1000.0))
     f_e = electrical_frequency(rpm, poles)
     out: dict[str, Any] = {"kind": kind, "study": study, "rpm": rpm, "electrical_frequency_Hz": f_e}
+    if kind not in ("cogging", "back_emf", "load_point"):
+        raise ValueError(f"analyze does not apply to {kind!r}")
     if kind == "cogging":
-        tq = await _table(call, study, ["Torque"], model)
+        _need(params, "slots")
+    tables = await _list_tables(call, study, model)
+    if kind == "cogging":
+        tq = await _table(call, study, ["Torque"], model, tables=tables)
         if not tq:
             raise RuntimeError("no 'Torque' table: add a Torque condition on the rotor parts and re-run")
         col = params.get("torque_column") or list(tq["columns"])[0]
@@ -244,30 +279,28 @@ async def analyze(call: Call, kind: str, study: str, params: dict, model: str | 
         out["metrics"] = cogging_metrics(tq["x"], tq["columns"][col], rpm, span)
         out["torque_column"] = col
     elif kind == "back_emf":
-        psi = await _table(call, study, ["FEMCoilFlux", "Coil Flux-Linkage"], model)
+        psi = await _table(call, study, ["FEMCoilFlux", "Coil Flux-Linkage"], model, tables=tables)
         if not psi:
             raise RuntimeError("no coil flux-linkage table (FEMCoilFlux): back-EMF needs FEM coils linked to a circuit")
-        volt = await _table(call, study, ["TerminalVoltage", "Circuit Voltage"], model)
+        volt = await _table(call, study, ["TerminalVoltage", "Circuit Voltage"], model, tables=tables)
         vmap = None
         if volt:  # probes are named VP_<coil> by jmag_circuit_quick
             vmap = {c: volt["columns"][f"VP_{c}"] for c in psi["columns"] if f"VP_{c}" in volt["columns"]} or None
         out["metrics"] = back_emf_metrics(psi["x"], psi["columns"], f_e, vmap)
     elif kind == "load_point":
-        tq = await _table(call, study, ["Torque"], model)
+        tq = await _table(call, study, ["Torque"], model, tables=tables)
         if not tq:
             raise RuntimeError("no 'Torque' table")
         col = params.get("torque_column") or list(tq["columns"])[0]
         out["metrics"] = load_point_metrics(tq["x"], tq["columns"][col], f_e)
-        cur = await _table(call, study, ["LineCurrent", "Circuit Current"], model)
-        psi = await _table(call, study, ["FEMCoilFlux", "Coil Flux-Linkage"], model)
+        cur = await _table(call, study, ["LineCurrent", "Circuit Current"], model, tables=tables)
+        psi = await _table(call, study, ["FEMCoilFlux", "Coil Flux-Linkage"], model, tables=tables)
         if cur and psi:
             coils = [c for c in psi["columns"] if c in cur["columns"]]
             if coils:
                 out["power_balance"] = health.power_balance(
                     cur["x"], {c: cur["columns"][c] for c in coils}, {c: psi["columns"][c] for c in coils},
                     tq["columns"][col], rpm, 1.0 / f_e)
-    else:
-        raise ValueError(f"analyze does not apply to {kind!r}")
     est = _estimate(params)
     if est is not None:
         out["estimate"] = est
@@ -275,8 +308,14 @@ async def analyze(call: Call, kind: str, study: str, params: dict, model: str | 
 
 
 async def _inductance(call: Call, study: str, params: dict, model: str | None) -> dict:
-    """Static solves with 'Current' conditions: L = psi/I, or Ld/Lq from zero/d/q tests."""
+    """Static solves with 'Current' conditions: L = psi/I, or Ld/Lq from zero/d/q tests.
+
+    Works on ``study`` itself (static solves are cheap; no duplicate). Every Current condition is set back to
+    0 A afterwards - also when a solve or a read fails - so the study is never left energised."""
+    _need(params, "current_peak")
     amp = float(params["current_peak"])
+    if amp == 0:
+        raise ValueError("current_peak must be non-zero")
     table = "Magnetic Flux of Current Condition"
 
     phases = params.get("phases")
@@ -287,46 +326,73 @@ async def _inductance(call: Call, study: str, params: dict, model: str | None) -
     all_current = [c["name"] for c in lc.get("conditions", []) if c.get("type") == "Current"]
     if not all_current:
         raise RuntimeError(f"study {study!r} has no 'Current' conditions: add them with jmag_add_current (Static study)")
+    mkw = {"model": model} if model else {}
 
-    async def solve_with(currents: dict[str, float]) -> dict[str, float]:
-        currents = {**{c: 0.0 for c in all_current}, **currents}  # every other coil carries 0 A
-        for cond, val in currents.items():
-            _ok(await call("set_properties", 120, target={"study": study, "kind": "condition", "name": cond},
-                           values={"Current": val}), f"set current of {cond}")
-        _ok(await call("run", float(params.get("timeout_s", 3600)), study=study, overwrite=True, model=model), "static run")
-        r = _ok(await call("get_result", 300, study=study, table=table, model=model), "flux of current conditions")
-        return {c: v[-1] for c, v in r["columns"].items()}
+    def target(cond: str) -> dict:
+        return {"study": study, "kind": "condition", "name": cond, **mkw}
 
-    if params.get("conditions"):  # one coil: all its Current conditions carry the same current
+    if params.get("conditions"):
         conds = list(params["conditions"])
         missing = [c for c in conds if c not in all_current]
         if missing:
             raise ValueError(f"not Current conditions of {study!r}: {missing}; Current conditions: {all_current}")
-        psi0 = await solve_with({})
-        psi = await solve_with({c: amp for c in conds})
-        total = sum(psi.get(c, 0.0) for c in conds)
-        base = sum(psi0.get(c, 0.0) for c in conds)
-        await solve_with({})
-        return {"kind": "inductance_static", "study": study, "current_A": amp,
-                "L_H": (total - base) / amp, "flux_linkage_Wb": total, "flux_linkage_at_zero_current_Wb": base,
-                "L_secant_incl_pm_H": total / amp, "per_condition_Wb": psi,
-                "note": "L = (psi(I) - psi(0)) / I: magnet flux removed; all Current conditions reset to 0 A"}
-    names = list(phases)
-    theta = float(params["d_axis_elec_deg"])
+    else:
+        names = list(phases)
+        theta = float(params["d_axis_elec_deg"])
+        missing = [c for ph in names for c in phases[ph] if c not in all_current]
+        if missing:
+            raise ValueError(f"not Current conditions of {study!r}: {missing}; Current conditions: {all_current}")
 
-    def per_phase(i_abc: Sequence[float]) -> dict[str, float]:
-        return {c: i for ph, i in zip(names, i_abc) for c in phases[ph]}
+    async def set_currents(currents: dict[str, float]) -> None:
+        for cond, val in currents.items():
+            _ok(await call("set_properties", 120, target=target(cond), values={"Current": val}),
+                f"set current of {cond}")
 
-    def phase_psi(psi: dict[str, float]) -> list[float]:
-        return [sum(psi.get(c, 0.0) for c in phases[ph]) for ph in names]
+    async def solve_with(currents: dict[str, float]) -> dict[str, float]:
+        await set_currents({**{c: 0.0 for c in all_current}, **currents})  # every other coil carries 0 A
+        _ok(await call("run", float(params.get("timeout_s", 3600)), study=study, overwrite=True, model=model), "static run")
+        r = _ok(await call("get_result", 300, study=study, table=table, model=model), "flux of current conditions")
+        return {c: v[-1] for c, v in r["columns"].items()}
 
-    zero = phase_psi(await solve_with(per_phase((0.0, 0.0, 0.0))))
-    dtest = phase_psi(await solve_with(per_phase(dq_currents(amp, theta, "d"))))
-    qtest = phase_psi(await solve_with(per_phase(dq_currents(amp, theta, "q"))))
+    async def reset() -> list[str]:
+        """Zero every Current condition; report (not raise) failures so the original error is not masked."""
+        failed = []
+        for c in all_current:
+            env = await call("set_properties", 120, target=target(c), values={"Current": 0.0})
+            if not env.get("ok"):
+                failed.append(c)
+        return failed
+
+    try:
+        if params.get("conditions"):  # one coil: all its Current conditions carry the same current
+            psi0 = await solve_with({})
+            psi = await solve_with({c: amp for c in conds})
+            total = sum(psi.get(c, 0.0) for c in conds)
+            base = sum(psi0.get(c, 0.0) for c in conds)
+            out = {"kind": "inductance_static", "study": study, "current_A": amp,
+                   "L_H": (total - base) / amp, "flux_linkage_Wb": total, "flux_linkage_at_zero_current_Wb": base,
+                   "L_secant_incl_pm_H": total / amp, "per_condition_Wb": psi,
+                   "note": "L = (psi(I) - psi(0)) / I: magnet flux removed; all Current conditions reset to 0 A "
+                           "(the stored results are those of the I test)"}
+        else:
+            def per_phase(i_abc: Sequence[float]) -> dict[str, float]:
+                return {c: i for ph, i in zip(names, i_abc) for c in phases[ph]}
+
+            def phase_psi(psi: dict[str, float]) -> list[float]:
+                return [sum(psi.get(c, 0.0) for c in phases[ph]) for ph in names]
+
+            zero = phase_psi(await solve_with(per_phase((0.0, 0.0, 0.0))))
+            dtest = phase_psi(await solve_with(per_phase(dq_currents(amp, theta, "d"))))
+            qtest = phase_psi(await solve_with(per_phase(dq_currents(amp, theta, "q"))))
+            out = None
+    finally:
+        failed = await reset()
+    if failed:
+        raise RuntimeError(f"could not reset Current conditions {failed} of {study!r} to 0 A: set them with "
+                           "jmag_set_properties before using the study")
+    if out is not None:
+        return out
     res = ld_lq(zero, dtest, qtest, amp, theta)
-    for c in all_current:  # leave the study at 0 A (results stay those of the q-axis test)
-        _ok(await call("set_properties", 120, target={"study": study, "kind": "condition", "name": c},
-                       values={"Current": 0.0}), f"reset {c}")
     if abs(res["psi_pm_q_Wb"]) > 0.1 * abs(res["psi_pm_d_Wb"]) or res["psi_pm_d_Wb"] < 0:
         res["warning"] = ("the magnet flux is not on +d at this d_axis_elec_deg (q0 not ~0 or d0 < 0): shift the "
                           "angle by the electrical angle of the magnet flux, e.g. +-90 or 180 deg, and repeat")
@@ -350,6 +416,8 @@ async def run_experiment(kind: str, study: str, params: dict, call: Call,
     _need(params, "poles")
     if kind == "load_point":
         _need(params, "current_peak")
+    if kind == "cogging":
+        _need(params, "slots")
     if action == "analyze":
         return await analyze(call, kind, study, params, model)
     target, plan, setup = await _prepare(call, kind, study, params, model)

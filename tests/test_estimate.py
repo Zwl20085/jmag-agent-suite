@@ -49,7 +49,13 @@ def test_airgap_flux_density_and_carter():
     assert r["value"] == pytest.approx(1.2 * 4 / 5)
     kc = estimate.carter_factor(2.5, 12, 1)["value"]
     assert 1.0 < kc < 1.2
-    assert estimate.airgap_flux_density(1.2, 4, 1, carter=kc)["value"] < r["value"]
+    x = 2.5 / 2.0                                   # b0 / (2 g)
+    gamma = 4 / math.pi * (x * math.atan(x) - math.log(math.sqrt(1 + x * x)))
+    assert kc == pytest.approx(12.0 / (12.0 - gamma * 1.0), rel=1e-12)
+    assert kc == pytest.approx(1.07402, abs=1e-5)
+    bg = estimate.airgap_flux_density(1.2, 4, 1, carter=kc, mu_r=1.0, leakage=1.0)["value"]
+    assert bg == pytest.approx(1.2 * 4 / (4 + kc * 1.0), rel=1e-12)   # Bg = Br hm / (hm + mu_r kc g)
+    assert bg == pytest.approx(0.94599, abs=1e-5) and bg < r["value"]
 
 
 def test_emf_torque_constants_consistent():

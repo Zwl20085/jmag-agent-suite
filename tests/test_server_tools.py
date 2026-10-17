@@ -25,6 +25,7 @@ class FakeBridge:
     def __init__(self):
         self.calls = []
         self.install = None
+        self.job = None
         self.journal = server.B.journal
         self.session = "test"
 
@@ -95,3 +96,40 @@ def test_plot_tool_from_study(fake, tmp_path):
                                        electrical_frequency_hz=300))
     assert '"ok": true' in out[0] and len(out) == 2
     assert ("get_result", {"study": "Coarse", "table": "Torque"}) in fake.calls
+
+
+# --------------------------------------------------------------------------- per-case reads vs. running jobs
+
+def test_case_reads_refused_while_a_job_runs(fake, tmp_path):
+    fake.job = {"id": "j1", "kind": "cases", "study": "Coarse", "done": False}
+    for coro in (server.jmag_get_result("Coarse", "Torque", case=1),
+                 server.jmag_list_results("Coarse", case=1),
+                 server.jmag_loss_study(action="results", study="Loss", case=0),
+                 server.jmag_export_table("Coarse", str(tmp_path / "t.csv"), case=1)):
+        r = asyncio.run(coro)
+        assert not r["ok"] and "jmag_run_status" in r["error"]["hint"], r
+    assert fake.calls == []          # nothing reached the worker
+    r = asyncio.run(server.jmag_list_results("Coarse"))   # current case: still allowed
+    assert r["ok"]
+    fake.job["done"] = True
+    r = asyncio.run(server.jmag_list_results("Coarse", case=1))
+    assert r["ok"] and ("list_results", {"study": "Coarse", "case": 1}) in fake.calls
+
+
+def test_run_cases_status_running_and_finished(fake, tmp_path, monkeypatch):
+    import json
+    import time
+    monkeypatch.setattr(server.winui, "dialogs", lambda: [])
+    prog = tmp_path / "j.progress.json"
+    prog.write_text(json.dumps({"state": "running", "cases": [0, 1, 2], "current_case": 1, "folder": None,
+                                "done": [{"case": 0, "state": "finished", "seconds": 3.2, "calc_folder": "x"}]}))
+    job = {"id": "j1", "kind": "cases", "study": "Coarse", "started": time.time() - 10, "done": False,
+           "cases": None, "progress_file": str(prog), "total_steps": 100}
+    st = asyncio.run(server._run_cases_status(job))
+    assert st["state"] == "running" and st["cases_done"] == "1/3" and st["current_case"] == 1
+    assert st["done"] == [{"case": 0, "state": "finished", "seconds": 3.2}]
+    job.update(done=True, finished=time.time(), response={"ok": True, "result": {"finished": [0, 1, 2]}})
+    st = asyncio.run(server._run_cases_status(job))
+    assert st["state"] == "finished" and st["run"]["result"]["finished"] == [0, 1, 2] and "case=k" in st["hint"]
+    job["response"] = {"ok": False, "error": {"message": "no case produced results"}}
+    assert asyncio.run(server._run_cases_status(job))["state"] == "failed"

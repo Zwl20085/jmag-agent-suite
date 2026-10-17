@@ -763,10 +763,26 @@ async def jmag_solver_report(study: str, model: str | None = None) -> dict:
 
 # =========================================================================== results
 
+def _case_busy(case: int | None) -> dict | None:
+    """Error envelope when a per-case read would switch the current case while a job runs.
+
+    Per-case reads call SetCurrentCase in the main worker; a jmag_run_cases loop switches cases in the runner
+    between solves, so the two can race (and a plain jmag_run is solving the current case)."""
+    if case is None or not B.job or B.job.get("done"):
+        return None
+    return {"ok": False, "error": {
+        "message": f"a solve is running ({B.job.get('study')}): per-case reads (case={case}) switch the current "
+                   "case and could disturb it",
+        "hint": "poll jmag_run_status until finished, then read case results; omit case to read the current case"}}
+
+
 @mcp.tool()
 async def jmag_list_results(study: str, case: int | None = None, model: str | None = None) -> dict:
     """Result tables of a solved study (name, unit, columns, rows): torque, flux linkage, currents, voltages, losses ...
     case: design-table case index (0-based, see jmag_case_table); default = current case."""
+    busy = _case_busy(case)
+    if busy:
+        return busy
     return await run_op("list_results", 120, study=study, case=case, model=model)
 
 
@@ -779,6 +795,9 @@ async def jmag_get_result(study: str, table: str, columns: list[str] | None = No
     case: design-table case index (0-based) to read instead of the current case (refused while a solve runs).
     Loss-study tables have x_name 'frequency' (Hz).
     """
+    busy = _case_busy(case)
+    if busy:
+        return busy
     env = await run_op("get_result", 300, study=study, table=table, columns=columns, case=case, model=model)
     if not env["ok"]:
         return env
@@ -1081,7 +1100,7 @@ async def jmag_make_report(title: str, studies: list[str], out_dir: str, include
         s["sweeps"] = [w for w in (sweeps or []) if w.get("study") == st or (len(studies) == 1 and not w.get("study"))]
         rows.append(s)
     if include_images and rows:
-        m = await run_op("model_image", 120, path=out_path("model", None))
+        m = await run_op("model_image", 120, path=out_path("model", None), **({"model": model} if model else {}))
         if m["ok"]:
             rows[0]["images"].insert(0, m["result"]["path"])
     placed = {id(w) for s in rows for w in s.get("sweeps", [])}
@@ -1455,6 +1474,9 @@ async def jmag_loss_study(action: str = "create", study: str = "", name: str | N
       Joule on row 0, and Joule rows 1.. sum to row 0. include_spectrum=true adds the rows.
     """
     if action == "results":
+        busy = _case_busy(case)
+        if busy:
+            return busy
         return await run_op("loss_results", 300, study=study, case=case, tables=tables,
                             include_spectrum=include_spectrum, model=model)
     if action != "create":
@@ -1558,6 +1580,9 @@ async def jmag_export_table(study: str, path: str, kind: str = "all_tables", tab
     force=true (save the project first). See references/advanced-api.md.
     Prefer jmag_export_results for plain per-table CSVs written by the bridge itself.
     """
+    busy = _case_busy(case)
+    if busy:
+        return busy
     return await run_op("export_table", 1800, study=study, path=str(Path(path).resolve()), kind=kind, table=table,
                         result_type=result_type, component=component, steps=steps, axis=axis, filetype=filetype,
                         case=case, overwrite=overwrite, force=force, model=model)
@@ -1637,6 +1662,13 @@ async def jmag_experiment(kind: str, study: str, params: dict, action: str = "ru
     except (ValueError, RuntimeError) as e:
         return {"ok": False, "error": {"message": str(e),
                                        "hint": "fix the params or the study setup named above, then call again"}}
+    except KeyError as e:
+        return {"ok": False, "error": {"message": f"missing param or result column {e}",
+                                       "hint": "check params against the kind's required keys (see this tool's "
+                                               "docstring) and the table columns (jmag_list_results)"}}
+    except TypeError as e:
+        return {"ok": False, "error": {"message": f"bad param type: {e}",
+                                       "hint": "numbers must be numbers, conditions/phases lists or dicts as documented"}}
     return {"ok": True, "result": res}
 
 

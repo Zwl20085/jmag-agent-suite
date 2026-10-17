@@ -95,10 +95,12 @@ def test_run_experiment_validates_before_touching_jmag():
     async def solve(*a, **k):
         return {}
 
-    for kind, params in (("nope", {}), ("load_point", {"poles": 4}), ("cogging", {"poles": 4}),
-                         ("inductance_static", {"current_peak": 5})):
+    for kind, params, action in (("nope", {}, "run"), ("load_point", {"poles": 4}, "run"),
+                                 ("cogging", {"poles": 4}, "run"), ("cogging", {"poles": 4}, "analyze"),
+                                 ("inductance_static", {"current_peak": 5}, "run"),
+                                 ("inductance_static", {"conditions": ["A"]}, "run")):
         with pytest.raises(ValueError):
-            asyncio.run(ex.run_experiment(kind, "S", params, call, solve))
+            asyncio.run(ex.run_experiment(kind, "S", params, call, solve, action=action))
     assert calls == []          # nothing was duplicated or changed in JMAG
 
 
@@ -112,6 +114,8 @@ def test_run_experiment_cogging_flow_with_fake_jmag():
 
     async def call(op, timeout, **a):
         seen.setdefault(op, []).append(a)
+        if op == "list_results":
+            return {"ok": True, "result": {"tables": [{"index": 0, "name": "Torque", "title": "Torque:N*m"}]}}
         if op == "get_result":
             return {"ok": True, "result": {"x": t, "columns": {"Torque": tq}}}
         return {"ok": True, "result": {"op": op}}
@@ -129,3 +133,91 @@ def test_run_experiment_cogging_flow_with_fake_jmag():
     assert out["metrics"]["dominant_order_per_rev"] == pytest.approx(12.0)
     assert out["metrics"]["pk_pk_Nm"] == pytest.approx(0.6, rel=1e-3)
     assert out["run_health"] == "PASS"
+
+
+def test_cogging_several_periods_keeps_samples_per_period():
+    seen = {}
+
+    async def call(op, timeout, **a):
+        seen.setdefault(op, []).append(a)
+        return {"ok": True, "result": {}}
+
+    async def solve(study, wait, f_e):
+        return {"state": "running"}
+
+    out = asyncio.run(ex.run_experiment("cogging", "Load", {"slots": 12, "poles": 4, "periods": 3,
+                                                            "steps_per_span": 90}, call, solve))
+    setup = seen["experiment_setup"][0]
+    assert setup["steps"] == 3 * 90 + 1
+    assert setup["time_step"] == pytest.approx(30 / 360 / 90)       # same sampling as one period
+    assert out["plan"]["steps_per_span"] == 90 and out["plan"]["span_mech_deg"] == pytest.approx(90.0)
+
+
+def test_analyze_picks_table_names_from_list_results():
+    """Never asks get_result for a name the study does not list (that would be a JMAG-logged probe)."""
+    asked = []
+    t = [k * 1e-4 for k in range(101)]
+
+    async def call(op, timeout, **a):
+        if op == "list_results":
+            return {"ok": True, "result": {"tables": [{"index": 0, "name": "Coil Flux-Linkage", "title": "Coil Flux-Linkage:Wb"}]}}
+        if op == "get_result":
+            asked.append(a["table"])
+            return {"ok": True, "result": {"x": t, "columns": {"CoilU": [math.cos(2 * math.pi * 100 * x) for x in t]}}}
+        raise AssertionError(op)
+
+    out = asyncio.run(ex.analyze(call, "back_emf", "S", {"poles": 4, "rpm": 3000}))
+    assert asked == ["Coil Flux-Linkage"]          # no FEMCoilFlux / TerminalVoltage / Circuit Voltage probes
+    assert out["metrics"]["phases"]["CoilU"]["psi1_peak_Wb"] == pytest.approx(1.0, rel=1e-3)
+
+
+def _inductance_fake(fail_on_run=None):
+    log = []
+    runs = [0]
+
+    async def call(op, timeout, **a):
+        log.append((op, a))
+        if op == "list_conditions":
+            return {"ok": True, "result": {"conditions": [{"name": "A", "type": "Current"}, {"name": "B", "type": "Current"}]}}
+        if op == "set_properties":
+            return {"ok": True, "result": {}}
+        if op == "run":
+            runs[0] += 1
+            if runs[0] == fail_on_run:
+                return {"ok": False, "error": {"message": "solver failed"}}
+            return {"ok": True, "result": {}}
+        if op == "get_result":
+            cur = {}
+            for o, x in log:
+                if o == "set_properties":
+                    cur[x["target"]["name"]] = x["values"]["Current"]
+            return {"ok": True, "result": {"columns": {c: [0.01 + 1e-3 * i] for c, i in cur.items()}}}
+        raise AssertionError(op)
+
+    return call, log
+
+
+def _currents_after(log):
+    cur = {}
+    for o, x in log:
+        if o == "set_properties":
+            cur[x["target"]["name"]] = x["values"]["Current"]
+    return cur
+
+
+def test_inductance_resets_currents_without_extra_solve_and_passes_model():
+    call, log = _inductance_fake()
+    out = asyncio.run(ex.run_experiment("inductance_static", "St", {"current_peak": 10, "conditions": ["A"]},
+                                        call, None, model="M1"))
+    assert out["L_H"] == pytest.approx(1e-3)
+    assert [o for o, _ in log].count("run") == 2                     # psi(0), psi(I) - no reset solve
+    assert _currents_after(log) == {"A": 0.0, "B": 0.0}
+    assert all(x["target"].get("model") == "M1" for o, x in log if o == "set_properties")
+
+
+def test_inductance_resets_currents_when_a_solve_fails():
+    call, log = _inductance_fake(fail_on_run=2)
+    with pytest.raises(RuntimeError, match="solver failed"):
+        asyncio.run(ex.run_experiment("inductance_static", "St", {"current_peak": 10, "conditions": ["A"]}, call, None))
+    assert _currents_after(log) == {"A": 0.0, "B": 0.0}
+    assert all("model" not in x["target"] for o, x in log if o == "set_properties")
