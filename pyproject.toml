@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "jmag-agent-suite"
-version = "0.2.0"
+version = "0.3.0"
 description = "All-in-one JMAG-Designer agent toolkit: MCP server, physics checks and Claude skills for electromagnetic FEA"
 readme = "README.md"
 license = { text = "MIT" }
@@ -27,10 +27,18 @@ Repository = "https://github.com/Zwl20085/jmag-agent-suite"
 Issues = "https://github.com/Zwl20085/jmag-agent-suite/issues"
 
 [project.scripts]
-jmag-mcp = "jmag_bridge.server:main"
+jmag-mcp = "jmag_bridge.__main__:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/jmag_bridge"]
+
+# The skills (operating manual) ship inside the package so any MCP client can read them via jmag_guide.
+# .claude/skills/ stays the single source of truth; jmag_bridge.guide prefers it in a checkout.
+[tool.hatch.build.targets.wheel.force-include]
+".claude/skills" = "jmag_bridge/skills"
+
+[tool.hatch.build.targets.sdist.force-include]
+".claude/skills" = ".claude/skills"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

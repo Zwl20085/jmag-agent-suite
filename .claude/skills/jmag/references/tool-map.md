@@ -16,6 +16,7 @@ Tools marked (new) were added with the skill family; read their description befo
 - `jmag_screenshot(out_dir?)` - images of every JMAG window, including hidden dialogs.
 - `jmag_cleanup` - kill orphaned `modeller.exe` helpers of dead Designers; report solver processes.
 - `jmag_quit(save?)` - close the connected Designer.
+- `jmag_doctor` (new) - install diagnostics without touching JMAG (Python, mcp, JMAG_HOME, JMAG's Python and PyJmag import, state dir, skills); relay each non-PASS `fix`.
 
 ## Project
 - `jmag_new_project(path, overwrite?)` - create and save a `.jproj` (required before DXF import).
@@ -112,3 +113,4 @@ Tools marked (new) were added with the skill family; read their description befo
 - `jmag_self_test(keep_open?, work_dir?)` - known-answer C-core test of the toolchain (6 checks).
 - `jmag_journal(export_script?, session_only?)` - log of state changes; exports a replayable script.
 - `jmag_star_repo(action)` - the user's answer to the one-time `first_run_note` (star | open | dismiss), as `first_run_action` says; only after an explicit answer.
+- `jmag_guide(topic?, reference?)` (new) - these skills and their references as text, for clients that do not load skills.

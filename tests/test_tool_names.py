@@ -17,9 +17,15 @@ def registered_tools() -> set[str]:
 
 
 def doc_files() -> list[Path]:
-    files = [ROOT / "README.md", ROOT / "CLAUDE.md"]
+    files = [ROOT / "README.md", ROOT / "README.zh-CN.md", ROOT / "CLAUDE.md"]  # zh-CN is optional
     files += sorted((ROOT / ".claude" / "skills").rglob("*.md"))
+    files += sorted((ROOT / "docs").glob("*.md"))
     return [f for f in files if f.is_file()]
+
+
+def test_docs_are_scanned():
+    names = {f.name for f in doc_files()}
+    assert {"README.md", "quickstart.md", "install-troubleshooting.md", "other-clients.md"} <= names
 
 
 def mentioned() -> dict[str, set[str]]:

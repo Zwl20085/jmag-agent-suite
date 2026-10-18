@@ -43,6 +43,8 @@ parametric -> postprocess.
 6. **Know the install.** `jmag_capabilities` lists the study types and API features this JMAG
    offers before you promise a loss study, efficiency map, thermal or optimisation run. JMAG
    has no licence query: a listed type can still fail at Run if the module is not licensed.
+   When `jmag_status`/`jmag_connect` report JMAG not found or the worker failed, call
+   `jmag_doctor` and relay each `fix` before suggesting a reinstall.
    - If `jmag_capabilities` or `jmag_self_test` returns `first_run_note`, relay it to the user
      verbatim and follow `first_run_action`: wait for the answer, then call `jmag_star_repo` with
      `star`, `open` or `dismiss`. Never call `jmag_star_repo` without an explicit answer.
@@ -51,7 +53,7 @@ parametric -> postprocess.
 
 | Phase | Tools |
 |---|---|
-| Session | `jmag_status` `jmag_connect` `jmag_capabilities` `jmag_dialogs` `jmag_screenshot` `jmag_cleanup` `jmag_quit` |
+| Session | `jmag_status` `jmag_connect` `jmag_capabilities` `jmag_dialogs` `jmag_screenshot` `jmag_cleanup` `jmag_quit` `jmag_doctor` |
 | Project | `jmag_new_project` `jmag_open_project` `jmag_save_project` `jmag_summary` `jmag_inventory` |
 | Geometry | `jmag_import_dxf` `jmag_import_cad` `jmag_list_parts` `jmag_rename_parts` `jmag_suppress_parts` `jmag_model_image` |
 | Design (pure, offline) | `jmag_estimate` `jmag_units` `jmag_winding_plan` |
@@ -66,7 +68,7 @@ parametric -> postprocess.
 | Parametric | `jmag_case_table` `jmag_run_cases` `jmag_optimization_table` |
 | Results | `jmag_list_results` `jmag_get_result` `jmag_export_results` `jmag_export_table` `jmag_case_report` `jmag_contour_image` `jmag_physics_check` `jmag_compare` `jmag_plot` `jmag_make_report` |
 | Knowledge / escape hatch | `jmag_docs_search` `jmag_docs_page` `jmag_api_lookup` `jmag_exec_python` |
-| Meta | `jmag_self_test` `jmag_journal` |
+| Meta | `jmag_self_test` `jmag_journal` `jmag_guide` |
 
 One line per tool: `references/tool-map.md`. Never call a `jmag_*` name that is not in that
 list; if something is missing, use `jmag-scripting`.

@@ -5,13 +5,15 @@
 
 # JMAG Agent Suite
 
+English | [简体中文](README.zh-CN.md)
+
 **The all-in-one agent toolkit for JMAG-Designer: build, solve, verify, sweep and report electromagnetic designs from your AI agent, with proof that the result is physics, not luck.**
 
 [![tests](https://github.com/Zwl20085/jmag-agent-suite/actions/workflows/tests.yml/badge.svg)](https://github.com/Zwl20085/jmag-agent-suite/actions/workflows/tests.yml)
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB)
 ![JMAG](https://img.shields.io/badge/JMAG--Designer-23.x-0b6e99)
 ![Platform](https://img.shields.io/badge/platform-Windows-0078D6)
-![Tools](https://img.shields.io/badge/MCP%20tools-72-6f42c1)
+![Tools](https://img.shields.io/badge/MCP%20tools-75-6f42c1)
 ![Skills](https://img.shields.io/badge/Claude%20skills-10-ff7b00)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -51,7 +53,7 @@ Commercial FEA tools were built for mouse clicks, not for agents. JMAG in partic
 returns an invalid object and logs a line), blocks on modal dialogs, quietly rewrites step settings for motion, and
 has a Python API that only runs on its bundled Python 3.8. An agent cannot just "call the API". It needs a layer that
 turns each of these into explicit, actionable feedback, plus the engineering judgement to tell a normal result from an
-abnormal one. That is this project: an [MCP](https://modelcontextprotocol.io) server with 73 tools, a pure-Python
+abnormal one. That is this project: an [MCP](https://modelcontextprotocol.io) server with 75 tools, a pure-Python
 engineering-check library, and ten [Claude skills](https://docs.claude.com/en/docs/claude-code/skills) that teach the
 agent how a machine designer works.
 
@@ -67,6 +69,22 @@ cd jmag-agent-suite
 ```
 
 Restart Claude Code and ask: *run the JMAG self-test*. Six known-answer checks tell you the toolchain and licence work.
+Next steps: [docs/quickstart.md](docs/quickstart.md).
+
+**If nothing shows up:** run `.venv\Scripts\python -m jmag_bridge --doctor` (the installer already ran it once). Each
+check is PASS, WARN or FAIL with a `fix:` line. A server that fails to start leaves its traceback in
+`server-startup.log` in the state folder (`%LOCALAPPDATA%\jmag-agent-suite`). Symptom by symptom:
+[docs/install-troubleshooting.md](docs/install-troubleshooting.md).
+
+**Update / uninstall:** `git pull; .\scripts\install.ps1` updates; `.\scripts\install.ps1 -Uninstall` removes the MCP
+registration and the skills (keeps `.venv`).
+
+**Installer options:** `-JmagHome <folder>`, `-Python <python.exe>`, `-Scope user|project|local`, `-NoMcp` (no Claude
+Code needed), `-NoSkills`, `-Uninstall`.
+
+**Other MCP clients (Cursor, Codex, Claude Desktop, VS Code):** config snippets in
+[docs/other-clients.md](docs/other-clients.md); have the agent call `jmag_guide` first, since those clients do not load
+the skills.
 
 <details>
 <summary>As a Claude Code plugin (marketplace), manual setup, other MCP clients, environment variables</summary>
@@ -161,11 +179,11 @@ The bridge checks at seven levels, cheapest first. The agent is taught to climb 
 ## Tools by task
 
 <details open>
-<summary>73 MCP tools, all prefixed <code>jmag_</code></summary>
+<summary>75 MCP tools, all prefixed <code>jmag_</code></summary>
 
 | Task | Tools |
 |---|---|
-| Session | `status` `connect` `capabilities` `dialogs` `screenshot` `cleanup` `quit` |
+| Session | `status` `connect` `capabilities` `dialogs` `screenshot` `cleanup` `quit` `doctor` (install diagnostics) |
 | Project and geometry | `new_project` `open_project` `save_project` `summary` `inventory` `import_dxf` `import_cad` `list_parts` `rename_parts` `suppress_parts` `model_image` |
 | Design helpers (no JMAG needed) | `estimate` `units` `winding_plan` |
 | Study setup | `create_study` `duplicate_study` `delete_study` `get_properties` `set_properties` `set_step` `set_equations` `get_equations` |
@@ -179,7 +197,7 @@ The bridge checks at seven levels, cheapest first. The agent is taught to climb 
 | Parametric and optimisation | `case_table` `run_cases` `optimization_table` |
 | Results | `list_results` `get_result` `export_results` `export_table` `case_report` `contour_image` `physics_check` `compare` `plot` `make_report` |
 | Knowledge | `docs_search` `docs_page` (your installed JMAG manual) `api_lookup` (JMAG Python API) |
-| Escape hatch and meta | `exec_python` `self_test` `journal` `star_repo` |
+| Escape hatch and meta | `exec_python` `self_test` `journal` `star_repo` `guide` (the skills, for clients without them) |
 
 Each tool's docstring states whether its JMAG calls are **verified** on 23.0 or **unverified** (implemented from the API
 reference). The skill `jmag/references/tool-map.md` lists every tool in one line.
@@ -234,6 +252,14 @@ Solves run in a separate runner worker attached to the same JMAG, so progress, c
 during hour-long runs. The things JMAG does that cost us a hang, a crash or a wrong number are collected in
 [docs/jmag-facts.md](docs/jmag-facts.md); contributor notes are in [CLAUDE.md](CLAUDE.md) and
 [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Docs
+
+- [docs/quickstart.md](docs/quickstart.md): the first ten minutes after installing
+- [docs/install-troubleshooting.md](docs/install-troubleshooting.md): one section per install or start-up symptom
+- [docs/other-clients.md](docs/other-clients.md): Cursor, Codex, Claude Desktop, VS Code, Windsurf
+- [docs/jmag-facts.md](docs/jmag-facts.md): measured JMAG behaviour that cost a hang, a crash or a wrong number
+- [CONTRIBUTING.md](CONTRIBUTING.md): how to add a tool or a skill
 
 ## Development
 

@@ -1,11 +1,34 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
+- 3 new MCP tools (72 -> 75): `jmag_doctor`, `jmag_guide`, `jmag_star_repo`.
+- Install diagnostics: `python -m jmag_bridge --doctor [--json]` (exit 1 if any check FAILs) and the read-only
+  tool `jmag_doctor` run the same stdlib-only checks without touching JMAG: host Python, `mcp` package, JMAG
+  install (`JMAG_HOME`), `designer.exe`, JMAG's Python (`JMAG_PYTHON`) and whether it runs, PyJmag import under it,
+  state dir writable, matplotlib, claude CLI, `claude mcp list` registration (CLI only), installed skills up to
+  date, running Designer PIDs. Every non-PASS row carries a `fix`. `--version` prints the package version.
+- Start-up failures (import or `mcp.run`) are appended with their traceback to `<state dir>/server-startup.log`
+  (fallback `%TEMP%`) with a one-line pointer on stderr, since Claude Code hides a failing server's output.
+  The `jmag-mcp` console script (used by the plugin's `uvx` launch) now goes through `jmag_bridge.__main__`, so
+  import-time failures are logged there too.
+- `scripts/install.ps1` hardened: finds Python >= 3.10 (`py -3.14` .. `-3.10`, then `python`/`python3`), rejects
+  the Microsoft Store stub and Store Python, `-Python <exe>` to choose; rejects a `.venv` that no longer runs or is
+  older than 3.10; checks for the `claude` CLI unless `-NoMcp`; validates `-JmagHome` (needs `designer.exe`, warns
+  without `python3.8`) and passes it to the MCP registration and to the final doctor run; installs `.[plots]`;
+  checks the exit code of venv, pip and `claude mcp add`; `-Uninstall` removes the registration and the skills;
+  ends with a doctor run and exits 1 if it reports FAIL.
+- The skills ship inside the wheel (`jmag_bridge/skills`) and the sdist; a checkout still reads `.claude/skills`
+  directly. `jmag_guide(topic?, reference?)` and the resources `jmag://guide`, `jmag://guide/{topic}`,
+  `jmag://guide/{topic}/{reference}` serve them to clients that do not load Claude skills; the server instructions
+  tell such clients to call `jmag_guide` first.
 - One-time, opt-in offer to star the repository: `jmag_capabilities` and `jmag_self_test` carry a
-  `first_run_note` until the user answers; new tool `jmag_star_repo(action)` (`star` via `gh api`, falling back
-  to opening the page in the browser; `open`; `dismiss`). The answer is recorded in `state.json` (`star_prompt`).
-- `jmag_bridge.__version__` now matches pyproject (0.2.0; it still said 0.1.0).
+  `first_run_note` until the user answers; `jmag_star_repo(action)` (`star` via `gh api`, falling back to opening
+  the page in the browser; `open`; `dismiss`). The answer is recorded in `state.json` (`star_prompt`).
+- `jmag_bridge.__version__` matches pyproject again (it still said 0.1.0 in 0.2.0).
+- Docs: `docs/quickstart.md` (first ten minutes), `docs/install-troubleshooting.md` (one section per symptom),
+  `docs/other-clients.md` (Cursor, Codex, Claude Desktop, VS Code, Windsurf), Chinese README `README.zh-CN.md`.
+  `tests/test_tool_names.py` now also checks `docs/*.md` and `README.zh-CN.md`.
 
 ## 0.2.0
 

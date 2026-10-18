@@ -39,6 +39,7 @@ Rules: never trust a step that returned ok=false; read error.hint and jmag_messa
 Unknown property names: jmag_get_properties lists valid ones; jmag_docs_search searches the local JMAG manual.
 Before FEA: jmag_estimate / jmag_winding_plan / jmag_units give the expected numbers (no JMAG needed). After:
 jmag_plot, jmag_compare, jmag_make_report; jmag_inventory shows the whole project tree.
+If your client did not load the jmag skills (not Claude Code), call jmag_guide first and follow its safety rules.
 """
 
 mcp = _Server("jmag", instructions=INSTRUCTIONS)
@@ -1255,6 +1256,26 @@ async def jmag_self_test(keep_open: bool = False, work_dir: str | None = None) -
     return with_first_run_note(await asyncio.to_thread(run_self_test, B.install, keep_open, work_dir))
 
 
+@mcp.tool(annotations=READ_ONLY)
+async def jmag_doctor() -> dict:
+    """Diagnose the installation without touching JMAG (no session, never attaches to or launches Designer; ~5 s).
+
+    Call it when the server answers but something underneath does not: jmag_status says JMAG was not found,
+    jmag_connect fails with "worker failed to start" / "JMAG Python not found", plots fail for lack of matplotlib,
+    or the user says the skills are missing - and always BEFORE telling the user to reinstall.
+    Returns result {summary: "n pass / n warn / n fail", checks: [{name, status: PASS|WARN|FAIL, detail, fix}]};
+    the envelope's ok is true whenever the checks ran, so judge the install by the FAIL count in summary.
+    Checks: host python, mcp package, jmag install (JMAG_HOME), designer.exe, jmag python (JMAG_PYTHON), that python
+    runs, PyJmag import under it, state dir writable, matplotlib, claude cli, skills in ~/.claude/skills, running
+    designer.exe PIDs. Relay each non-PASS row's `fix` to the user verbatim; WARN rows are optional features.
+    The same report is `python -m jmag_bridge --doctor` in a terminal.
+    """
+    from . import doctor
+    checks = await asyncio.to_thread(doctor.run_checks, False)  # False: no `claude mcp list` from inside a session
+    rep = doctor.report(checks)
+    return {"ok": True, "result": {"summary": rep["summary"], "checks": rep["checks"]}}
+
+
 def with_first_run_note(out: Any) -> Any:
     """Copy of a dict tool result plus `first_run_note` (user text of the one-time star offer) and `first_run_action`
     (what the agent must do with it) until the user has answered it."""
@@ -1697,8 +1718,121 @@ async def jmag_experiment(kind: str, study: str, params: dict, action: str = "ru
     return {"ok": True, "result": res}
 
 
-def main() -> None:
-    mcp.run()
+# =========================================================================== operating manual (skills)
+
+@mcp.tool(annotations=READ_ONLY)
+async def jmag_guide(topic: str | None = None, reference: str | None = None) -> dict:
+    """The jmag operating manual (the jmag-* skills): safety rules, feedback ladder, verified JMAG property
+    names and the tool map. Pure, no JMAG needed.
+
+    Call this first if your client did not load the jmag skills (i.e. you are not in Claude Code), and follow
+    the safety rules it returns before driving JMAG.
+    No args: index of all skills {name, description} plus the full text of the 'jmag' router skill (entry point:
+      safety rules, which skill for which task, phase-by-phase tool map).
+    topic='<skill name>' (e.g. 'jmag-simulation', 'jmag-troubleshooting'): that skill's text and its reference files.
+    topic + reference='<file>' (e.g. topic='jmag-simulation', reference='properties.md'; '.md' optional): one file
+      from the skill's references/ folder. reference without topic searches every skill for that file name.
+    Skills tell you when to read a reference ("see references/x.md") - fetch it with this tool.
+    """
+    from . import guide
+
+    try:
+        names = guide.skill_names()
+        if topic is None and reference is None:
+            return {"ok": True, "result": {"skills": guide.list_skills(), "topic": guide.ROUTER,
+                                           "text": guide.read_skill(guide.ROUTER),
+                                           "references": guide.list_references(guide.ROUTER),
+                                           "next": "jmag_guide(topic=<skill>) for the skill that fits the task"}}
+        if topic is None:
+            hits = [n for n in names if _guide_has_ref(guide, n, reference)]
+            if len(hits) != 1:
+                where = f"found in {hits}" if hits else "not found in any skill"
+                return {"ok": False, "error": {"message": f"reference {reference!r} {where}",
+                                               "hint": "pass topic=<skill> too; jmag_guide(topic=<skill>) lists "
+                                                       "its references"}}
+            topic = hits[0]
+        if topic not in names:
+            return {"ok": False, "error": {"message": f"unknown topic {topic!r}",
+                                           "hint": "valid topics: " + ", ".join(names)}}
+        refs = guide.list_references(topic)
+        if reference is not None:
+            try:
+                text = guide.read_skill(topic, reference)
+            except KeyError:
+                return {"ok": False, "error": {"message": f"skill {topic!r} has no reference {reference!r}",
+                                               "hint": "valid references: " + (", ".join(refs) or "(none)")}}
+            return {"ok": True, "result": {"topic": topic, "reference": reference, "text": text}}
+        return {"ok": True, "result": {"topic": topic, "text": guide.read_skill(topic), "references": refs}}
+    except ValueError as e:
+        return _bad_input(e, "use a plain skill name from jmag_guide() and a file name from its references list")
+    except FileNotFoundError as e:
+        return {"ok": False, "error": {"message": str(e), "hint": "reinstall jmag-agent-suite (pip install -U "
+                                                                  "jmag-agent-suite) so the skills are packaged"}}
+
+
+def _guide_has_ref(guide: Any, name: str, reference: str) -> bool:
+    try:
+        guide.read_skill(name, reference)
+        return True
+    except KeyError:
+        return False
+
+
+def _register_guide_resources() -> None:
+    """jmag://guide (router skill) and jmag://guide/{topic}[/{reference}] for clients that read resources."""
+    from . import guide
+
+    def _read(topic: str, reference: str | None = None) -> str:
+        try:
+            return guide.read_skill(topic, reference)
+        except KeyError:
+            raise ValueError(f"unknown jmag guide topic/reference {topic!r}/{reference!r}; "
+                             "valid topics: " + ", ".join(guide.skill_names())) from None
+
+    @mcp.resource("jmag://guide", name="jmag-guide", mime_type="text/markdown",
+                  description="jmag router skill: safety rules, skill index and tool map. Read first.")
+    def _guide_router() -> str:
+        return _read(guide.ROUTER)
+
+    @mcp.resource("jmag://guide/{topic}", name="jmag-guide-topic", mime_type="text/markdown",
+                  description="One jmag skill by name (e.g. jmag-simulation).")
+    def _guide_topic(topic: str) -> str:
+        return _read(topic)
+
+    @mcp.resource("jmag://guide/{topic}/{reference}", name="jmag-guide-reference", mime_type="text/markdown",
+                  description="One file from a jmag skill's references/ folder.")
+    def _guide_reference(topic: str, reference: str) -> str:
+        return _read(topic, reference)
+
+
+try:  # resources are optional: an SDK without @mcp.resource (or templates) still serves the tools
+    _register_guide_resources()
+except Exception:  # noqa: BLE001
+    pass
+
+
+def main(argv: list[str] | None = None) -> None:
+    """Console entry (`jmag-mcp`, `python -m jmag_bridge`): MCP server on stdio, or --doctor / --version."""
+    import argparse
+    import sys
+
+    from . import __version__, doctor
+    p = argparse.ArgumentParser(prog="jmag-mcp", description="JMAG Agent Suite MCP server (stdio).")
+    p.add_argument("--doctor", action="store_true", help="check the installation and exit (0 = no FAIL)")
+    p.add_argument("--json", action="store_true", help="with --doctor: print the report as JSON")
+    p.add_argument("--version", action="version", version=f"jmag-agent-suite {__version__}")
+    args, unknown = p.parse_known_args(argv)
+    if args.doctor:
+        sys.exit(doctor.cli(as_json=args.json))
+    if args.json:
+        p.error("--json only works together with --doctor")
+    if unknown:
+        print(f"jmag-agent-suite: ignoring unknown arguments {unknown}", file=sys.stderr)
+    try:
+        mcp.run()
+    except Exception as e:  # Claude Code hides the traceback: leave a log and a pointer to --doctor
+        doctor.record_startup_failure(e)
+        raise
 
 
 if __name__ == "__main__":
