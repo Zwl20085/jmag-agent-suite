@@ -55,8 +55,11 @@ def recorded():
 
 
 def test_prompt_shown_until_answered():
-    msg = star.first_run_prompt()
-    assert msg and star.REPO_URL in msg and "jmag_star_repo" in msg and "explicit answer" in msg
+    p = star.first_run_prompt()
+    assert set(p) == {"first_run_note", "first_run_action"}
+    note, action = p["first_run_note"], p["first_run_action"]
+    assert star.REPO_URL in note and "AGENT" not in note and "USER" not in note and "jmag_star_repo" not in note
+    assert "jmag_star_repo" in action and "explicit answer" in action and "first_run_note" in action
     star.star_repo("dismiss", run=FakeRun(), which=which_gh, open_url=FakeOpen())
     assert star.first_run_prompt() is None
 
@@ -145,9 +148,11 @@ class CapsBridge:
 def test_capabilities_carries_note_only_on_first_run(monkeypatch):
     monkeypatch.setattr(server, "B", CapsBridge())
     first = asyncio.run(server.jmag_capabilities())
-    assert first["ok"] and first["result"] == {"version": "23.0"} and "jmag_star_repo" in first["first_run_note"]
+    assert first["ok"] and first["result"] == {"version": "23.0"}
+    assert first["first_run_note"] == star.FIRST_RUN_NOTE and first["first_run_action"] == star.FIRST_RUN_ACTION
     star.star_repo("dismiss", run=FakeRun(), which=which_gh, open_url=FakeOpen())
-    assert "first_run_note" not in asyncio.run(server.jmag_capabilities())
+    after = asyncio.run(server.jmag_capabilities())
+    assert "first_run_note" not in after and "first_run_action" not in after
 
 
 def test_star_tool_rejects_bad_action_without_recording():

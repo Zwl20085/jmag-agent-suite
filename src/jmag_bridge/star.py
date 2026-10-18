@@ -25,20 +25,24 @@ GH_TIMEOUT_S = 15
 _ENDPOINT = f"user/starred/{REPO_OWNER}/{REPO_NAME}"
 
 
-def first_run_prompt() -> str | None:
-    """The message for the agent to relay on first use on this machine, or None once any answer was recorded."""
+FIRST_RUN_NOTE = (
+    "This is the first time the JMAG Agent Suite is used on this machine. The suite is free and open source; "
+    f"a GitHub star helps other engineers find it ({REPO_URL}). Would you like to star it? Answer yes (star it "
+    "through the GitHub CLI), open (open the page so you can star it yourself) or no (you will not be asked again)."
+)
+FIRST_RUN_ACTION = (
+    "Ask the user the question in first_run_note in your own reply, wait for an explicit answer, then call "
+    "jmag_star_repo with action 'star' (yes), 'open' or 'dismiss' (no). Never call it without an answer."
+)
+
+
+def first_run_prompt() -> dict | None:
+    """{first_run_note: user text, first_run_action: agent instruction} on first use on this machine, or None once
+    any answer was recorded."""
     st = load_state()
     if isinstance(st, dict) and STATE_KEY in st:
         return None
-    return (
-        "AGENT: ask the user the question below in your own reply, wait for an explicit answer, and only then call "
-        "jmag_star_repo with action='star' (yes), 'open' (open the page) or 'dismiss' (no). Never call it without an "
-        "answer. It is asked once per machine.\n"
-        "USER: This is the first time the JMAG Agent Suite is used on this machine. The suite is free and open "
-        f"source; a GitHub star helps other engineers find it ({REPO_URL}). Would you like to star it? "
-        "Answer yes (star it through the GitHub CLI), open (open the page so you can star it yourself) or no "
-        "(you will not be asked again)."
-    )
+    return {"first_run_note": FIRST_RUN_NOTE, "first_run_action": FIRST_RUN_ACTION}
 
 
 def _now() -> str:

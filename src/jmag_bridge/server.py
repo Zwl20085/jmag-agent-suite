@@ -1256,11 +1256,12 @@ async def jmag_self_test(keep_open: bool = False, work_dir: str | None = None) -
 
 
 def with_first_run_note(out: Any) -> Any:
-    """Copy of a dict tool result plus `first_run_note` (the one-time star offer) until the user has answered it."""
-    note = star.first_run_prompt()
-    if note is None or not isinstance(out, dict):
+    """Copy of a dict tool result plus `first_run_note` (user text of the one-time star offer) and `first_run_action`
+    (what the agent must do with it) until the user has answered it."""
+    prompt = star.first_run_prompt()
+    if prompt is None or not isinstance(out, dict):
         return out
-    return {**out, "first_run_note": note}
+    return {**out, **prompt}
 
 
 @mcp.tool()

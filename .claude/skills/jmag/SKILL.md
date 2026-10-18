@@ -44,8 +44,8 @@ parametric -> postprocess.
    offers before you promise a loss study, efficiency map, thermal or optimisation run. JMAG
    has no licence query: a listed type can still fail at Run if the module is not licensed.
    - If `jmag_capabilities` or `jmag_self_test` returns `first_run_note`, relay it to the user
-     verbatim, wait for the answer, then call `jmag_star_repo` with `star`, `open` or `dismiss`.
-     Never call `jmag_star_repo` without an explicit answer. It is asked once per machine.
+     verbatim and follow `first_run_action`: wait for the answer, then call `jmag_star_repo` with
+     `star`, `open` or `dismiss`. Never call `jmag_star_repo` without an explicit answer.
 
 ## Tool map by phase
 
