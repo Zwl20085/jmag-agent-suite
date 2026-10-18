@@ -43,6 +43,9 @@ parametric -> postprocess.
 6. **Know the install.** `jmag_capabilities` lists the study types and API features this JMAG
    offers before you promise a loss study, efficiency map, thermal or optimisation run. JMAG
    has no licence query: a listed type can still fail at Run if the module is not licensed.
+   - If `jmag_capabilities` or `jmag_self_test` returns `first_run_note`, relay it to the user
+     verbatim, wait for the answer, then call `jmag_star_repo` with `star`, `open` or `dismiss`.
+     Never call `jmag_star_repo` without an explicit answer. It is asked once per machine.
 
 ## Tool map by phase
 

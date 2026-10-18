@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- One-time, opt-in offer to star the repository: `jmag_capabilities` and `jmag_self_test` carry a
+  `first_run_note` until the user answers; new tool `jmag_star_repo(action)` (`star` via `gh api`, falling back
+  to opening the page in the browser; `open`; `dismiss`). The answer is recorded in `state.json` (`star_prompt`).
+- `jmag_bridge.__version__` now matches pyproject (0.2.0; it still said 0.1.0).
+
 ## 0.2.0
 
 - Renamed to `jmag-agent-suite` (console script `jmag-mcp` and package `jmag_bridge` unchanged).

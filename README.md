@@ -51,7 +51,7 @@ Commercial FEA tools were built for mouse clicks, not for agents. JMAG in partic
 returns an invalid object and logs a line), blocks on modal dialogs, quietly rewrites step settings for motion, and
 has a Python API that only runs on its bundled Python 3.8. An agent cannot just "call the API". It needs a layer that
 turns each of these into explicit, actionable feedback, plus the engineering judgement to tell a normal result from an
-abnormal one. That is this project: an [MCP](https://modelcontextprotocol.io) server with 72 tools, a pure-Python
+abnormal one. That is this project: an [MCP](https://modelcontextprotocol.io) server with 73 tools, a pure-Python
 engineering-check library, and ten [Claude skills](https://docs.claude.com/en/docs/claude-code/skills) that teach the
 agent how a machine designer works.
 
@@ -161,7 +161,7 @@ The bridge checks at seven levels, cheapest first. The agent is taught to climb 
 ## Tools by task
 
 <details open>
-<summary>72 MCP tools, all prefixed <code>jmag_</code></summary>
+<summary>73 MCP tools, all prefixed <code>jmag_</code></summary>
 
 | Task | Tools |
 |---|---|
@@ -179,7 +179,7 @@ The bridge checks at seven levels, cheapest first. The agent is taught to climb 
 | Parametric and optimisation | `case_table` `run_cases` `optimization_table` |
 | Results | `list_results` `get_result` `export_results` `export_table` `case_report` `contour_image` `physics_check` `compare` `plot` `make_report` |
 | Knowledge | `docs_search` `docs_page` (your installed JMAG manual) `api_lookup` (JMAG Python API) |
-| Escape hatch and meta | `exec_python` `self_test` `journal` |
+| Escape hatch and meta | `exec_python` `self_test` `journal` `star_repo` |
 
 Each tool's docstring states whether its JMAG calls are **verified** on 23.0 or **unverified** (implemented from the API
 reference). The skill `jmag/references/tool-map.md` lists every tool in one line.
@@ -269,6 +269,13 @@ skills that encode how an engineer judges a result.
   them unless `force=true`.
 - JMAG is commercial software. This project contains none of its code or documentation. Not affiliated with JSOL
   Corporation. JMAG is a trademark of JSOL Corporation.
+
+## Support the project
+
+On first use on a machine, `jmag_capabilities` and `jmag_self_test` include a one-time `first_run_note` asking
+whether you would like to star the repository on GitHub. It is opt-in: nothing is starred unless you say yes (then
+through the GitHub CLI, or the repo page opens in your browser if `gh` is unavailable). Answer no and it is never
+asked again; the answer lives under `star_prompt` in `state.json` in the state folder (`JMAG_BRIDGE_HOME`).
 
 ## License
 

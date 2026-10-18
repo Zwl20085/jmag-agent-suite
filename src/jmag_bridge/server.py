@@ -23,7 +23,7 @@ except ImportError:  # SDK v1
     from mcp.server.fastmcp import FastMCP as _Server, Image  # type: ignore
 from mcp.types import ToolAnnotations
 
-from . import compare, estimate, health, materials, plotting, reporting, solver_monitor, units, winding, winui
+from . import compare, estimate, health, materials, plotting, reporting, solver_monitor, star, units, winding, winui
 from .config import find_jmag, load_state, save_state, state_dir
 from .docs_index import DocsIndex
 from .worker_client import Worker, WorkerError
@@ -1252,7 +1252,31 @@ async def jmag_self_test(keep_open: bool = False, work_dir: str | None = None) -
     """
     from .selftest import run_self_test
     B.need_install()
-    return await asyncio.to_thread(run_self_test, B.install, keep_open, work_dir)
+    return with_first_run_note(await asyncio.to_thread(run_self_test, B.install, keep_open, work_dir))
+
+
+def with_first_run_note(out: Any) -> Any:
+    """Copy of a dict tool result plus `first_run_note` (the one-time star offer) until the user has answered it."""
+    note = star.first_run_prompt()
+    if note is None or not isinstance(out, dict):
+        return out
+    return {**out, "first_run_note": note}
+
+
+@mcp.tool()
+async def jmag_star_repo(action: str) -> dict:
+    """Act on the user's answer to the one-time `first_run_note` (offer to star the repo on GitHub).
+
+    Call ONLY after the user explicitly answered that question - never on your own initiative, never as a guess.
+    action='star' (user said yes): stars through the GitHub CLI (`gh`); if gh is missing, not logged in or fails,
+      opens the repo page in the browser instead. action='open': opens the repo page only. action='dismiss' (no).
+    Any answer is recorded in state.json and the note never appears again on this machine.
+    Returns {ok, method: gh | already_starred | browser | dismissed, message, url}.
+    """
+    try:
+        return await asyncio.to_thread(star.star_repo, action)
+    except ValueError as e:
+        return {"ok": False, "error": {"message": str(e), "hint": "star | open | dismiss"}}
 
 
 def _journal_rows(session_only: bool = True) -> list[dict]:
@@ -1299,7 +1323,7 @@ async def jmag_capabilities(model: str | None = None) -> dict:
     Pitfall: JMAG 23 has no licence query API - a listed study type can still fail at Run if the licence lacks
     the solver module (the run report names it). VERIFIED on 23.0.
     """
-    return await run_op("capabilities", 120, model=model)
+    return with_first_run_note(await run_op("capabilities", 120, model=model))
 
 
 @mcp.tool()

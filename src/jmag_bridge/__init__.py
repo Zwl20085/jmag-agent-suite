@@ -1,2 +1,2 @@
 """JMAG Agent Suite (package jmag_bridge): let AI agents drive JMAG-Designer with engineering feedback."""
-__version__ = "0.1.0"
+__version__ = "0.2.0"

@@ -111,3 +111,4 @@ Tools marked (new) were added with the skill family; read their description befo
 ## Meta
 - `jmag_self_test(keep_open?, work_dir?)` - known-answer C-core test of the toolchain (6 checks).
 - `jmag_journal(export_script?, session_only?)` - log of state changes; exports a replayable script.
+- `jmag_star_repo(action)` - answer to the one-time `first_run_note` (star | open | dismiss); only after the user answered.
