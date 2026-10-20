@@ -22,6 +22,9 @@ Contents
 - S-3D-7 Custom linear magnet and per-part magnetisation direction - VERIFIED (3D, 2026-10-20)
 - S-3D-8 Nodal `Torque` on the rotor parts and the `Torque` table - VERIFIED (3D, 2026-10-20)
 - S-3D-9 List the condition types and their property tables - VERIFIED (3D, 2026-10-20)
+- S-3D-10 User B-H steel and its full read-back - VERIFIED (3D, 2026-10-20)
+- S-3D-11 Nonlinear iteration / tolerance study properties - VERIFIED (3D, 2026-10-20)
+- S-3D-12 Nonlinear iteration count from `jcgmntr` - VERIFIED (3D, 2026-10-20)
 
 Rules for this file: every JMAG call is a member listed in the JMAG 23.0 script reference
 inventory or already exercised by the bridge's `worker/ops.py`. **VERIFIED** = the same calls
@@ -32,7 +35,8 @@ run through the bridge: use on a copy, read back, report what happened, and mark
 Static transformer studies whose inductances matched independent FE within 0.9 % (workflow and
 traps: `jmag-simulation` -> `references/static-3d.md`). **VERIFIED (3D, 2026-10-20)** = run live the
 same way on a 12-slot / 10-pole axial-flux PM machine (13 rotor positions, one periodic sector) whose
-flux linkage, load torque and cogging matched independent FE within 0.6 % (`static-3d.md` section 8).
+flux linkage, load torque and cogging matched independent FE within 0.6 % (`static-3d.md` section 8),
+linear and, for S-3D-10 to S-3D-12, with nonlinear B-H steel (`static-3d.md` section 9).
 
 Each snippet assumes S1 is pasted above it (the worker does not share state between calls).
 Globals available: `app`, `designer`, `ctx`, `OpError`, `result`.
@@ -363,8 +367,9 @@ result = {"faces": c.GetSelection().NumFaces(), "points": len(pts), "Angle": c.G
           "BoundaryType": c.GetValue("BoundaryType"), "keys": list(c.GetKeyNames("BoundaryType") or [])}
 ```
 `CoilFlux` and `StoredEnergy` of the sector come out as full-model values (no symmetry factor):
-psi within 0.03-0.06 % of the full model. `FullModelConversion` / `ConversionFactor` were left at
-their defaults (UNVERIFIED); the torque of a sector was not checked at a loaded position.
+psi within 0.03-0.06 % of the full model. The nodal `Torque` of a sector is a full-model value too
+(loaded sector 1.863 vs full 1.882 N m, 2026-10-20). `FullModelConversion` / `ConversionFactor` were
+read as 1 / 1 and left unchanged; other values UNVERIFIED.
 
 ## S-3D-7 Custom linear magnet and per-part magnetisation direction - VERIFIED (3D, 2026-10-20)
 
@@ -439,3 +444,76 @@ result = out
 ```
 3D Static on 23.0: 29 types, no `RotationMotion` (list in `jmag-simulation` ->
 `references/static-3d.md` section 8.1). `SymmetryBoundary` has no properties.
+
+## S-3D-10 User B-H steel and its full read-back - VERIFIED (3D, 2026-10-20)
+
+Create the material with the tool (`jmag_create_material(name="M270_user", bh=[[0, 0], [H1, B1],
+...])`: `MagneticPropertyType` 0, `MagneticSteelPermeabilityType` 2, `BhTable`), then check it from
+`jmag_exec_python` against the table you sent:
+
+```python
+bh = [[0.0, 0.0], [32.0, 0.1], [45.0, 0.2]]          # example: paste the table you created (H A/m, B T)
+lib = app.GetMaterialLibrary()
+um = lib.GetUserMaterial("M270_user")
+if um is None or not um.IsValid():
+    raise OpError("no user material M270_user")
+ds = um.GetTable("BhTable")
+back = [[ds.GetValue(i, 0), ds.GetValue(i, 1)] for i in range(ds.GetRows())]
+same = len(back) == len(bh) and all(abs(a[0] - b[0]) <= 1e-9 * max(1.0, b[0]) and abs(a[1] - b[1]) <= 1e-12
+                                    for a, b in zip(back, bh))
+result = {"rows": len(back), "equal": same,
+          "MagneticPropertyType": um.GetValue("MagneticPropertyType"),           # 0 = steel (1 = magnet)
+          "MagneticSteelPermeabilityType": um.GetValue("MagneticSteelPermeabilityType"),   # 2 = B-H curve
+          "IsMagnet": bool(um.IsMagnet())}
+```
+Then per steel part `s.SetMaterialByName(part, "M270_user")` and check
+`s.GetMaterial(part).GetName()`. On 23.0 a 22-point table plus the origin read back as 23 equal rows,
+`IsMagnet` False; the 3D Static solve converged in 8-9 iterations.
+
+## S-3D-11 Nonlinear iteration / tolerance study properties - VERIFIED (3D, 2026-10-20)
+
+```python
+def read_prop(obj, name):                    # S2, with ClearError on a failed read
+    t = (obj.GetPropertyType(name) or "").lower()
+    if t in ("flag", "double", "real", "bool", "boolean"):
+        try:
+            return obj.GetValue(name)
+        except Exception:
+            app.ClearError(); return None
+    if t == "string":
+        return obj.GetStringValue(name)
+    return "<" + t + ">"
+
+keys = ("NonlinearMaxIteration", "NonlinearTolerance", "IccgTolerance", "IccgMaxIteration",
+        "FullModelConversion", "ConversionFactor")
+s = find_study(app.GetCurrentModel(), "NL")
+sp = s.GetStudyProperties()
+names = list(sp.GetPropertyNames() or [])
+before = dict((n, read_prop(sp, n)) for n in keys if n in names)
+for k, v in (("NonlinearMaxIteration", 50), ("NonlinearTolerance", 1e-5)):
+    if k not in names:
+        raise OpError("study property %r does not exist" % k)
+    sp.SetValue(k, v)
+result = {"before": before, "after": dict((n, read_prop(sp, n)) for n in keys if n in names)}
+```
+3D Static defaults on 23.0: `NonlinearMaxIteration` 15 (type Flag), `NonlinearTolerance` 1e-3
+(Double), `IccgTolerance` 1e-8, `IccgMaxIteration` 5000, `FullModelConversion` 1,
+`ConversionFactor` 1. The runs set them on the no-load study before `jmag_duplicate_study` made
+the load studies; the copies were not read back separately, so set them on each copy when in doubt.
+
+## S-3D-12 Nonlinear iteration count from `jcgmntr` - VERIFIED (3D, 2026-10-20)
+
+Runs in the suite's own Python (not inside `jmag_exec_python`): the file is read from disk after the
+run. `folder` is the case folder the run reports (`calc_folder`, e.g.
+`<project>.jfiles/<model>~1/<study>~1/Case1`).
+
+```python
+from jmag_bridge import solver_monitor
+conv = solver_monitor.convergence(folder, 50)   # 50 = NonlinearMaxIteration of the study
+# {"available": True, "steps": 1, "max_nonlinear_iterations": 9, "mean_nonlinear_iterations": 9.0,
+#  "steps_at_iteration_limit": [], "n_steps_at_limit": 0}
+```
+`jcgmntr` rows are `step  nonlinear_iteration  linear_iterations`; the count is the largest
+nonlinear iteration per step. Through the MCP tools, `jmag_check(study, stage="post")` returns the
+same dictionary as `convergence`. A Static study has one step; `{"available": False}` means no
+`jcgmntr` (linear study, or the run did not finish).

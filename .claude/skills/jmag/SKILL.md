@@ -14,7 +14,7 @@ specialised skill for the actual work.
 | The user wants to ... | Load |
 |---|---|
 | set up, run, debug or validate one study (the core loop, feedback ladder, JMAG quirks) | `jmag-simulation` |
-| a 3D static study from a STEP model (transformer / inductor L matrix, coil inflow faces, symmetry; PM machine psi / torque / cogging per rotor angle, periodic sector) | `jmag-simulation` -> `references/static-3d.md` |
+| a 3D static study from a STEP model (transformer / inductor L matrix, coil inflow faces, symmetry; PM machine psi / torque / cogging per rotor angle, periodic sector, nonlinear B-H) | `jmag-simulation` -> `references/static-3d.md` |
 | draw or import geometry (DXF/STEP + labels JSON, templates, symmetry sectors) | `jmag-geometry` |
 | size a machine, pick slots/poles/winding, sanity-check a design by hand | `jmag-machine-design` |
 | run a standard test: cogging, back-EMF, Ld/Lq, load point, torque-speed, locked rotor, OC/SC, force-stroke, coupling k | `jmag-experiments` |

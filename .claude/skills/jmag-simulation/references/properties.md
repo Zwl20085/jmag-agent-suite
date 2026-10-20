@@ -9,8 +9,8 @@ For anything not listed: `jmag_get_properties(with_help=true)` and `jmag_docs_se
 |---|---|
 | ModelThickness | 2D stack length [mm] (default 1!) |
 | ConversionFactor / FullModelConversion | partial-model scaling |
-| NonlinearMaxIteration (15), NonlinearTolerance (1e-3) | Newton settings |
-| DirectSolverType, IccgTolerance, IccgMaxIteration | linear solver |
+| NonlinearMaxIteration (15), NonlinearTolerance (1e-3) | Newton settings (defaults read on 3D Static, 2026-10-20; `static-3d.md` section 9) |
+| DirectSolverType, IccgTolerance (1e-8), IccgMaxIteration (5000) | linear solver (defaults read on 3D Static, 2026-10-20) |
 | UseMultiCPU, MultiCPU | parallel solve |
 | Energy | 1 = output stored-energy table (needed for `check='energy'`) |
 | CsvOutputPath, CsvResultTypes | JMAG's own CSV output |

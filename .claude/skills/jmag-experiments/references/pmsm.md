@@ -85,7 +85,44 @@ effects) use 3D Static cases instead, one rotor angle each (`jmag-simulation` ->
 Expect ~80 s per no-load case at ~620 k elements. Each angle has its own mesh, so cogging carries
 mesh noise (+-0.035 N m on 0.33 N m pk-pk there; the two ends of a period differed by 0.011 N m):
 report pk-pk over the period and the end-of-period mismatch as the noise level. Achieved vs an
-independent 3D FE: psi 0.2-0.6 %, load torque 0.3 %, cogging pk-pk 0.3 %.
+independent 3D FE: psi 0.2-0.6 %, load torque 0.3 %, cogging pk-pk 0.3 %. With nonlinear B-H steel
+(`static-3d.md` section 9: user B-H material, `NonlinearMaxIteration` / `NonlinearTolerance`,
+iterations from `jcgmntr`): about 9 iterations, mesh 30-47 s + solve 120-200 s per case at 622 k
+elements; psi 0.2-0.6 %, load torque 0.6 % at 5 A and 15 A, cogging pk-pk 0.03 %. A 180 deg periodic
+sector's `Torque` is the full-model value (factor 1).
+
+### 2c. 2D Static per-angle cases from rotated DXFs (radial machine)
+
+When a quick static check of a radial machine is wanted without a transient (cross-check of psi and
+torque at a few rotor angles), use one 2D Static study per angle. VERIFIED on 23.0, 2026-10-20, on a
+12-slot / 10-pole radial SPM cross-section (linear steel, B_r 1.2 T magnets, 30 turns per coil
+side) against an independent solver:
+1. Geometry (`jmag-geometry`): one **full** cross-section DXF per rotor angle with the rotor turned
+   in the geometry, plus its labels JSON (no motion in a Static study).
+2. `jmag_new_project`, `jmag_import_dxf`, `jmag_rename_parts` from the labels (check areas; dedupe
+   repeated names first, below), `jmag_create_study(study_type="Static2D")`.
+3. Materials: steel `linear_2000` (or the grade); magnets with pattern `Radial`, origin (0, 0, 0)
+   and `SetOrientation` outward / inward alternating per pole (the run used the custom Linear(Br)
+   magnet of `static-3d.md` 8.3 through `jmag_exec_python`); coils `Copper`; the rest `Air`.
+4. One `jmag_add_current` per coil side (`turns`, `direction` up / down from the winding table);
+   load study = `jmag_duplicate_study` + `jmag_set_properties(kind="condition")` `Current` = i_phase
+   from the dq currents at that angle.
+5. `SymmetryBoundary` (A_z = 0) on the edges of the outer stator circle and of the bore circle
+   (`SelectEdgeByPosition` in `jmag_exec_python`); `ModelThickness` = stack; mesh control
+   `AirRegion` 0 (the 2D mesh control has it and accepts 0), `AutoMeshSize` 0, `MeshSize` + part
+   sizes; `Energy` 1.
+6. Nodal `Torque` on the rotor parts (`Origin` 0, `Axis2D` 0); after the run read `Torque` and
+   `CoilFlux` by internal key; psi_phase = sum of `CoilFlux` over the up and down sides of the phase
+   (each condition's flux follows its own direction).
+
+Expect 5 s mesh + 2 s solve per study at 20 k elements. Agreement with the independent solver at
+matched mesh sizes: psi 0.03 %, load torque 0.3 %. **Cogging is not converged at that size**:
+going from 20 k to 101 k elements moved the cogging peaks by 30 % while psi moved 0.3 %, so run a
+gap-mesh study before quoting cogging (section 2). Benign warning: "Check if there are one or more
+independent models that are surrounded by the symmetry boundaries" for a source-free bore disc
+whose whole boundary is `SymmetryBoundary` (its field is zero). Labels trap: a part straddling
+theta = 0 at a rotated angle can appear twice with the same name; rename the second `<name>__2`
+before `jmag_rename_parts` and keep it in the same material and rotor group.
 
 ## 3. Open-circuit back-EMF
 

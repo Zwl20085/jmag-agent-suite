@@ -106,3 +106,37 @@ positions plus a 180 deg periodic sector. Details: `.claude/skills/jmag-simulati
 - `StoredEnergy` with magnets is not 1/2 integral(nu B^2) (JMAG 3.82 J vs 9.27 J from another solver): do not compare
   energies across tools when magnets are present.
 - Accuracy vs an independent 3D FE solver: flux linkage 0.2-0.6 %, load torque 0.3 %, cogging peak-to-peak 0.3 %.
+
+## Nonlinear 3D Static, sector torque, 2D radial SPM (measured 2026-10-20, JMAG-Designer 23.0.01zv)
+
+Same axial-flux PM machine as above with nonlinear steel (M270-35A, 22 points 0.1-2.2 T), and a radial-flux SPM
+cross-section (12 slots / 10 poles) as a 2D Static study. Details: `static-3d.md` sections 8.2, 8.5 and 9;
+`jmag-experiments` -> `references/pmsm.md` section 2c.
+
+- User B-H steel through `create_material` (`MagneticPropertyType` 0, `MagneticSteelPermeabilityType` 2, `BhTable`):
+  the 22-point table plus the `(0, 0)` origin read back as 23 rows equal to the input; `IsMagnet()` False.
+- 3D Static study properties read: `NonlinearMaxIteration` 15 (Flag), `NonlinearTolerance` 1e-3 (Double),
+  `IccgTolerance` 1e-8, `IccgMaxIteration` 5000, `FullModelConversion` 1, `ConversionFactor` 1. Set to 50 / 1e-5:
+  at 15 A the default and the tight tolerance gave psi equal to 4e-8 and torque to 3e-7 (7 vs 9 iterations).
+- The case folder's `jcgmntr` gives the nonlinear iterations per step (`solver_monitor.convergence`): 8-9 per case,
+  none at the limit. Mesh 29-47 s + solve 119-198 s per case at 622 k elements (machine shared with another job).
+- Every nonlinear case logged "Magnetic flux density is over B-H curve. Please check B-H curve. ... Solver
+  extrapolate the magnetic permeability using the extrapolation method specified." (peak |B| 2.49 T > table end
+  2.2 T); a warning only.
+- 180 deg `RotationPeriodicBoundary` `Reverse` sector at a loaded position: rotor nodal `Torque` 1.863 N m vs 1.882
+  N m from the full model, so the sector torque is reported as the full-model value (factor 1), as `CoilFlux` and
+  `StoredEnergy` are. The stator `Torque` condition reports the opposite sign (-1.925 N m). Done with the defaults
+  `FullModelConversion` 1 / `ConversionFactor` 1; other values not tried.
+- Nonlinear accuracy vs an independent 3D FE solver with the same B-H table: psi 0.2-0.6 %, load torque 0.6 % at 5 A
+  and 0.5 % at 15 A, cogging peak-to-peak 0.03 %.
+- 2D Static radial SPM from one rotated DXF per rotor angle (`import_dxf`, rename by point, `add_current` per coil
+  side up / down, Radial magnets outward / inward, `linear_2000`): `SymmetryBoundary` on the edges of the outer
+  circle and of an internal bore circle accepted; the 2D mesh control has `AirRegion` and accepts 0;
+  `ModelThickness` sets the stack; nodal `Torque` (`Origin`, `Axis2D`, `ExpandTarget`) gives result key `Torque`.
+  5 s mesh + 2 s solve at 20 k elements.
+- A zero-field bore disc enclosed by `SymmetryBoundary` edges triggers the solver warning "Check if there are one or
+  more independent models that are surrounded by the symmetry boundaries" on every run; benign there.
+- 2D cogging is mesh-sensitive: 20 k -> 101 k elements moved the cogging peaks by 30 % while psi moved 0.3 % and
+  load torque < 0.1 %. Agreement with an independent solver at matched sizes: psi 0.03 %, load torque 0.3 %.
+- `rename_parts` reports `duplicate_names` when a DXF part straddling theta = 0 was written as two regions with the
+  same label name (a magnet at a rotated angle); dedupe the labels (`<name>__2`) before renaming.

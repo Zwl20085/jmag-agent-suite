@@ -53,6 +53,9 @@ end-to-end on JMAG 23.0). Templates for other devices: `references/templates.md`
 - **Self-check in the script:** compute expected part areas (sector:
   `(r2^2-r1^2)*pi*span/360`) and the expected part count; compare with what `jmag_import_dxf`
   returns. Area or count mismatch = broken loop.
+- **Unique label names per angle.** When the rotor is turned in the geometry, a part that
+  straddles theta = 0 can come out as two regions; give each its own name (`<name>__2`) or
+  `jmag_rename_parts` reports `duplicate_names` (seen 2026-10-20 on a radial SPM magnet).
 
 ## Symmetry sectors
 

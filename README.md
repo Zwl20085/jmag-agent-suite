@@ -127,8 +127,8 @@ API but not yet exercised on a real licence. **Recipe** = the skill walks the ag
 |---|---|---|---|---|---|
 | Geometry (DXF/STEP + labels) | Verified | Recipe | Recipe | Verified (2D DXF, 3D STEP) | Recipe |
 | Winding layout and FEM coils | Verified | Verified | Recipe | Verified (2D inductor) | Verified |
-| Static study, 2D (L, force, flux) | Verified | Recipe | Recipe | Verified (inductor) | Recipe |
-| Static study, 3D (STEP, symmetry / periodic sector, `Current` inflow face, nodal torque) | Verified (axial-flux PM: psi, load torque, cogging per angle; periodic sector) | Recipe | Recipe | Verified (transformer L matrix) | Recipe |
+| Static study, 2D (L, force, flux) | Verified (incl. radial SPM per-angle psi / torque) | Recipe | Recipe | Verified (inductor) | Recipe |
+| Static study, 3D (STEP, symmetry / periodic sector, `Current` inflow face, nodal torque, nonlinear B-H) | Verified (axial-flux PM, linear and nonlinear: psi, load torque, cogging per angle; periodic sector incl. torque) | Recipe | Recipe | Verified (transformer L matrix) | Recipe |
 | Transient with circuit and motion | Verified | Recipe | Recipe | Verified (2D inductor, no motion) | Recipe |
 | 3D transient, 3D windings / FEM coils, 3D field export | Script | Script | Script | Script | Script |
 | Setup lint, solver monitor, cancel | Verified | Verified | Verified | Verified | Verified |
@@ -150,7 +150,12 @@ OC/SC tests are recipes, and nothing 3D beyond Static has been run. The SPM cell
 axial-flux PM machine run on 2026-10-20 (13 rotor positions as separate cases, a 180 deg `RotationPeriodicBoundary`
 sector verified against the full model): psi 0.2-0.6 %, load torque 0.3 %, cogging peak-to-peak 0.3 % from
 independent FE; `Torque_Surface` does not work there (use the nodal `Torque` condition)
-([workflow](.claude/skills/jmag-simulation/references/static-3d.md)).
+([workflow](.claude/skills/jmag-simulation/references/static-3d.md)). The same machine with nonlinear B-H steel
+(user B-H material, `NonlinearMaxIteration` / `NonlinearTolerance`, iterations from `jcgmntr`) gave psi 0.2-0.6 %,
+load torque 0.6 % at 5 A and 15 A, cogging peak-to-peak 0.03 %, and a loaded 180 deg sector showed that its torque
+is reported as the full-model value. The 2D Static SPM cell includes a 12-slot / 10-pole radial SPM cross-section,
+one rotated DXF per angle (2026-10-20): psi 0.03 %, load torque 0.3 % from an independent solver; its cogging was
+not mesh-converged at 20 k elements ([recipe](.claude/skills/jmag-experiments/references/pmsm.md)).
 
 ## How trust works: the feedback ladder
 

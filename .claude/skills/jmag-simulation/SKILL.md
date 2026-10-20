@@ -32,7 +32,7 @@ numbers, whether the model is working **normally or abnormally**.
    **3D Static** (STEP model, `Current` condition with an inflow face, half model with
    `SymmetryBoundary`): follow `references/static-3d.md` step by step - verified on 23.0. Rotating
    machines in 3D Static (magnets, slit coils with leads, nodal `Torque`, periodic sector, one case
-   per rotor angle): its section 8.
+   per rotor angle): its section 8; nonlinear B-H steel in 3D Static: its section 9.
 5. Physics: `jmag_set_material` (magnets with `orientation`), stack length
    `jmag_set_properties(kind='study', values={'ModelThickness': L_mm})`, excitation
    (static: `jmag_add_current`; transient: `jmag_circuit_quick` + `jmag_add_fem_coil`, or

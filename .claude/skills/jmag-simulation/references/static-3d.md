@@ -2,7 +2,8 @@
 
 Contents: 1 Status - 2 Coil excitation: which mode - 3 Workflow step by step - 4 Result keys -
 5 Traps - 6 Cross-validation numbers - 7 Not verified yet -
-8 Rotating machines in 3D Static (PM machine, rotor positions, periodic sector, torque)
+8 Rotating machines in 3D Static (PM machine, rotor positions, periodic sector, torque) -
+9 Nonlinear 3D Static (user B-H steel, iteration / tolerance, `jcgmntr`)
 
 ## 1. Status
 
@@ -24,6 +25,10 @@ poll `jmag_run_status`.
 machine (12 slots / 10 poles, linear materials) as a full 360 deg model in 13 rotor-position cases plus one
 180 deg periodic sector, checked against an independent 3D FE solver. It covers magnets, slit coils with
 leads, the nodal `Torque` condition, `RotationPeriodicBoundary` and per-angle STEP cases: section 8.
+
+**VERIFIED (23.0, 2026-10-20), third batch** = the same machine with nonlinear B-H steel (user B-H material,
+nonlinear iteration / tolerance properties, iteration count from `jcgmntr`) and a loaded periodic sector that
+fixes the sector torque factor at 1: sections 8.2, 8.5 and 9.
 
 ## 2. Coil excitation: which mode
 
@@ -124,9 +129,9 @@ value. Use this as the expected accuracy of a well-meshed linear 3D Static run.
 
 3D Transient / Frequency with FEM coils, circuits or eddy currents; windings (`jmag_winding`) in 3D;
 field exports, point probes and section graphs in 3D (snippets S11 / S12 are UNVERIFIED in 2D too);
-nonlinear B-H in 3D; `FullModelConversion` / `ConversionFactor` (left at their defaults); the torque
-conversion of a periodic sector (only a cogging-zero position was run on a sector); a coil cut by a
-periodic boundary; `RotationPeriodicBoundary` `Normal` / `AxialReverse`; `CurrentDensity`;
+`FullModelConversion` / `ConversionFactor` at non-default values (the defaults 1 / 1 were read and left
+unchanged; nonlinear B-H and the sector torque conversion are verified since 2026-10-20, sections 8.2
+and 9); a coil cut by a periodic boundary; `RotationPeriodicBoundary` `Normal` / `AxialReverse`; `CurrentDensity`;
 `Torque_Surface` on an external face; rotor motion inside one Static study (no `RotationMotion`:
 rotor positions are separate cases).
 
@@ -170,13 +175,17 @@ fails the worker call even inside `try` (seen with `TargetType` on `Torque`): re
 | A face with no condition | JMAG's natural boundary = flux normal; differs from `A_t = 0` | documented (manual "Symmetry Boundary Condition and Natural Boundary Condition"), avoided |
 | Periodic sector | `RotationPeriodicBoundary` with `Origin` (0,0,0), `Axis` (0,0,1), `Angle` = sector angle, `AutoPeriodicFromWinding` 0, `BoundaryType` 1, on the faces of **one** cut plane only (nothing on the other); snippet S-3D-6 | VERIFIED (23.0, 2026-10-20) |
 | `BoundaryType` | integer in key order: 0 `Normal`, 1 `Reverse`, 2 `AxialReverse`. 1 Reverse = anti-periodic, the choice for a sector spanning an odd number of poles; Normal (periodic, even number of poles) by name | `BoundaryType` 1 = anti-periodic VERIFIED; 0 and 2 UNVERIFIED |
-| Sector results | `CoilFlux` and `StoredEnergy` of the sector come out already converted to the full model: **do not multiply by the symmetry factor** (unlike the half model of sections 2-3, which needed x2) | VERIFIED (23.0, 2026-10-20) |
-| `FullModelConversion` / `ConversionFactor` | left at the defaults | UNVERIFIED |
+| Sector results | `CoilFlux`, `StoredEnergy` and the nodal `Torque` of the sector come out already converted to the full model: **do not multiply by the symmetry factor** (factor 1; unlike the half model of sections 2-3, which needed x2) | VERIFIED (23.0, 2026-10-20; torque at a loaded position, section 8.5) |
+| `FullModelConversion` / `ConversionFactor` | defaults read on the study: `FullModelConversion` 1, `ConversionFactor` 1; all sector results above were taken with these defaults, left unchanged | defaults VERIFIED; non-default values UNVERIFIED |
 
 Check: 180 deg sector (6 slots / 5 poles, `Reverse`), theta = 0, no load: psi_A 50.413 / psi_B
 -25.414 mWb vs the full model 50.400 / -25.428 (+0.03 % / -0.06 %), energy 3.8257 vs 3.8245 J,
 311 k elements, solve 15 s. Torque at that position is cogging-zero (sector 0.0009, full -0.0054
-N m, both mesh noise), so the torque conversion of a sector is not tested.
+N m, both mesh noise), so a second, loaded sector case tests the torque: theta = 3 deg, I_q = 5 A,
+nonlinear steel (section 9), same 180 deg `Reverse` set-up: rotor `Torque` 1.8626 N m vs the full
+model 1.8822 (ratio 0.990, the per-mesh nodal-torque noise of 8.7), psi_A 47.488 vs 47.474 mWb
+(+0.03 %), 311 k elements, solve 48 s. A raw half-model torque would be about 0.94 N m, so the
+reported value is the full-model one: **factor 1 for torque too**.
 
 ### 8.3 Magnets
 
@@ -218,6 +227,12 @@ on the model's outer surface" confirmed for faces on the outer wall instead of a
   `Torque`, one column per condition, torque about +axis in N m. `ExpandTarget` 1 changed nothing (to
   all digits). A second condition on the stator parts gives about minus the rotor torque (load:
   rotor 1.906, stator -1.933 N m). VERIFIED (23.0, 2026-10-20).
+- **Periodic sector: the reported `Torque` is already the full-model value (factor 1)** with the
+  defaults `FullModelConversion` 1 / `ConversionFactor` 1: a 180 deg `Reverse` sector at a loaded
+  position gave 1.863 N m on the rotor vs 1.882 N m from the full model (8.2). The stator condition
+  reports the opposite sign (sector -1.925, full -1.894 N m): it is the reaction torque, not a
+  second copy of the rotor torque. Do not multiply by 360 / sector angle. VERIFIED (23.0,
+  2026-10-20).
 - **`Torque_Surface` does not work for this**: a part selection is not accepted (`NumParts` reads 0)
   and Run aborts with "The target is not specified for the electromagnetic force or torque
   calculation condition"; selecting the internal mid-gap face by position picks both sides, whose
@@ -260,10 +275,84 @@ JMAG 23.0 vs an independent 3D FE solver (same geometry, same flux-parallel box)
    current conserves N I through every section (as an electrokinetic coil-current solution does,
    which then agreed). Check the reference's coil model before blaming JMAG.
 3. Leaving outer faces without a condition gives the natural (flux-normal) boundary, not `A_t = 0`.
-4. Multiplying a periodic sector's `CoilFlux` by the symmetry factor double-counts (8.2).
+4. Multiplying a periodic sector's `CoilFlux` or `Torque` by the symmetry factor double-counts (8.2,
+   8.5).
 5. `Torque_Surface` and the both-sides face selection (8.5).
 6. `GetValue` of a property the condition lacks fails the call (8.1).
 7. Geometry side: gmsh's `isInside(2, face, p)` ignores face trimming (a lead-end centre tested
    "inside" 5 faces); find small lead faces by bounding box and place boundary-face points on a
    coarse surface mesh, away from the face edges.
 8. No modal dialog and no crash in the 2026-10-20 runs; every Designer quit at the end.
+
+## 9. Nonlinear 3D Static
+
+**VERIFIED (23.0, 2026-10-20)** on the axial-flux PM machine of section 8 (same geometry, mesh,
+622 k elements, and cases: no load at 10 angles, I_q = 5 A and 15 A at 3 angles, plus the loaded
+180 deg sector of 8.2) with the steel parts (stator yoke, teeth, rotor iron) on a user B-H curve,
+M270-35A, 22 points 0.1 .. 2.2 T. Compared with an independent 3D FE solver using the same B-H
+table and a Newton solve.
+
+### 9.1 User B-H steel
+
+| Step | Call | Status |
+|---|---|---|
+| Create | `jmag_create_material(name, bh=[[H, B], ...])` (worker op `create_material`): `CreateCustomMaterial`, then on `GetUserMaterial(name)` `MagneticPropertyType` 0 (soft-magnetic steel; 1 is a magnet), `MagneticSteelPermeabilityType` 2 (B-H curve), `SetTable("BhTable", ...)` | VERIFIED (3D, 2026-10-20) |
+| Table | the 22 points plus the origin `(0, 0)` as the first row, H in A/m, B in T | VERIFIED |
+| Read back | `GetUserMaterial(name).GetTable("BhTable")`: all 23 rows equal to the input, `MagneticPropertyType` 0, `IsMagnet()` False (snippet S-3D-10) | VERIFIED |
+| Assign | `s.SetMaterialByName(part, name)` per steel part, check `s.GetMaterial(part).GetName()` | VERIFIED |
+
+Do not copy the flags of a protected library steel: its MaterialObject flag `MagneticType` 0
+("PermON_BH") is a magnet with a demagnetisation table (`jmag-simulation` ->
+`references/properties.md`). `create_material` sets the Material-Editor flags above and checks them.
+
+### 9.2 Analysis control
+
+| Study property | Default read | Set here | Note |
+|---|---|---|---|
+| `NonlinearMaxIteration` | 15 | 50 | no case reached the limit |
+| `NonlinearTolerance` | 1e-3 | 1e-5 | at 15 A, 3 deg: default vs 1e-5 gave psi equal to 4e-8 and torque to 3e-7 (relative), 7 vs 9 iterations |
+| `IccgTolerance` | 1e-8 | unchanged | linear solver |
+| `IccgMaxIteration` | 5000 | unchanged | linear solver |
+| `FullModelConversion` / `ConversionFactor` | 1 / 1 | unchanged | sector values are full-model values (8.2) |
+
+Read each property gated on `GetPropertyType` and set it with `SetValue` on
+`s.GetStudyProperties()` (snippet S-3D-11; the runs went through `jmag_exec_python`). The default
+tolerance was already enough for psi and torque on this machine; the tighter one costs about two
+iterations. VERIFIED (23.0, 2026-10-20).
+
+### 9.3 Convergence: iteration count from `jcgmntr`
+
+The case folder of a finished run (`<project>.jfiles/<model>~N/<study>~M/CaseK`) holds `jcgmntr`,
+rows `step  nonlinear_iteration  linear_iterations`. The bridge parses it with
+`jmag_bridge.solver_monitor.convergence(folder, max_iter)` (max iteration per step, mean, steps at
+the limit); the runs here called it on the `calc_folder` the run reported (snippet S-3D-12), and
+`jmag_check(stage="post")` returns the same dictionary as `convergence`. Here: 8-9 nonlinear
+iterations per case, none at the limit. VERIFIED (23.0, 2026-10-20).
+
+### 9.4 Cost
+
+Ryzen 7 3800X, 622 k elements, another heavy job on the machine (upper bounds): mesh 29-47 s and
+solve 119-198 s per case (about 9 nonlinear iterations), against ~40 s for the linear solve of 8.6.
+The 311 k element 180 deg sector solved in 48 s. Full set (13 load and no-load cases, the tolerance
+probe, the sector) about 65 min.
+
+### 9.5 Cross-validation numbers
+
+JMAG 23.0 vs the independent 3D FE solver, both nonlinear with the same table: psi_A -0.2 to
+-0.6 % over all angles; load torque -0.6 % at 5 A and -0.5 % at 15 A; cogging peak-to-peak 0.3267
+vs 0.3268 N m (-0.03 %). The nonlinear-minus-linear change of psi agreed to 0.005 % (absolute) in
+the two tools (no load, 0 / 3 / 6 deg: JMAG -0.652 / -0.570 / -0.435 %). At 15 A the tooth tips
+saturate (|B| 99th percentile 2.21 T, max 2.49 T, past the table's 2.2 T: both tools extrapolate
+the curve there) while torque stays linear in current (15 A / 5 A = 2.990 .. 3.001).
+
+### 9.6 Traps
+
+1. B beyond the last table point is extrapolated: every nonlinear case here (no load included)
+   reported the solver warning "Magnetic flux density is over B-H curve. Please check B-H curve.
+   ... Solver extrapolate the magnetic permeability using the extrapolation method specified."
+   It is a warning, not an error, and the results still agreed with the other solver; when the
+   result depends on the deep-saturation region, extend the table past the peak |B| instead.
+2. The defaults (15 iterations, 1e-3) were adequate here; on a harder saturation case read the
+   `jcgmntr` count (9.3) before trusting a result, and raise `NonlinearMaxIteration` when a step
+   sits at the limit.
+3. Sector torque: factor 1, stator sign opposite (8.5).

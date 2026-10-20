@@ -99,3 +99,22 @@ them lets you interpret what you see.
   check `GetPropertyNames()` first.
 - Per-angle meshes make cogging noisy (+-0.035 N m on a 0.33 N m peak-to-peak here); `StoredEnergy`
   with magnets is not comparable with another tool's 1/2 integral(nu B^2).
+
+## Nonlinear 3D Static, sectors, 2D radial machines (verified 2026-10-20; `references/static-3d.md` 8.5, 9)
+- Nonlinear defaults: `NonlinearMaxIteration` 15, `NonlinearTolerance` 1e-3 (also `IccgTolerance`
+  1e-8, `IccgMaxIteration` 5000). They were enough on a PM machine (1e-5 changed psi by 4e-8);
+  read the iteration count from `jcgmntr` (`jmag_check(stage="post")` -> `convergence`) before
+  trusting a harder case, and raise the limit when a step sits on it.
+- B above the last B-H point gives the warning "Magnetic flux density is over B-H curve ... Solver
+  extrapolate the magnetic permeability ..." and the run continues; extend the table if the
+  deep-saturation region matters.
+- A periodic sector's nodal `Torque` is already the full-model value (factor 1, like `CoilFlux`);
+  a stator `Torque` condition reports the opposite sign of the rotor's.
+- 2D cogging is far more mesh-sensitive than flux linkage: 20 k -> 101 k elements moved cogging peaks
+  by 30 % and psi by 0.3 %. Do a gap-mesh study before quoting cogging.
+- A region enclosed entirely by `SymmetryBoundary` edges (e.g. a source-free bore disc) gives the
+  warning "Check if there are one or more independent models that are surrounded by the symmetry
+  boundaries"; benign when that region should have zero field.
+- Labels trap: a part straddling theta = 0 in a rotated DXF can be two regions with the same label
+  name; `jmag_rename_parts` then reports `duplicate_names`. Make the names unique (`<name>__2`)
+  and keep both pieces in the same material / rotor group.
