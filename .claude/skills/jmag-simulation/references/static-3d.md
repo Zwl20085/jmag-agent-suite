@@ -284,6 +284,22 @@ JMAG 23.0 vs an independent 3D FE solver (same geometry, same flux-parallel box)
    coarse surface mesh, away from the face edges.
 8. No modal dialog and no crash in the 2026-10-20 runs; every Designer quit at the end.
 
+### 8.9 Arbitrary rotor angles (off-step positions)
+
+The per-angle STEP route of 8.6 takes any rotor angle: nothing is tied to a mesh step, because every
+case is its own geometry and mesh. VERIFIED on 23.0, 2026-10-20, same machine, settings and mesh sizes
+(621-622 k elements): no load at 0.7, 1.3 and 2.9 deg and I_q = 5 A at 0.7 deg, against an
+independent 3D FE solver that reaches these angles with a non-conforming (mortar / interpolation)
+sliding interface: psi 0.6 % at every angle (the same offset as on the 1 deg grid), load torque
+0.3-0.7 %, cogging within 0.019 N m (5.4 % of 0.357 N m peak-to-peak; the same solver pair scattered
+by up to 0.028 N m on the 1 deg grid). Measured noise of this route: the off-step points lie on the
+periodic cubic through JMAG's own on-step points (0..5 deg, period 6 deg) to 0.007 N m (2 % of its
+peak-to-peak) and 1e-4 in psi. Cost as 8.6: 28-30 s mesh + 37-41 s solve, 77-80 s per no-load case,
+160 s with a load study. So for a cogging curve at arbitrary angles write one STEP per wanted angle;
+sample finely enough to resolve the peaks (a cubic through 1 deg points on a 6 deg period missed a
+peak by 0.006 N m on the reference curve, the same size as the remeshing noise), and quote the
+period-end mismatch as the noise level (8.7).
+
 ## 9. Nonlinear 3D Static
 
 **VERIFIED (23.0, 2026-10-20)** on the axial-flux PM machine of section 8 (same geometry, mesh,

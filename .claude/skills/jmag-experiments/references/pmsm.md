@@ -89,7 +89,11 @@ independent 3D FE: psi 0.2-0.6 %, load torque 0.3 %, cogging pk-pk 0.3 %. With n
 (`static-3d.md` section 9: user B-H material, `NonlinearMaxIteration` / `NonlinearTolerance`,
 iterations from `jcgmntr`): about 9 iterations, mesh 30-47 s + solve 120-200 s per case at 622 k
 elements; psi 0.2-0.6 %, load torque 0.6 % at 5 A and 15 A, cogging pk-pk 0.03 %. A 180 deg periodic
-sector's `Torque` is the full-model value (factor 1).
+sector's `Torque` is the full-model value (factor 1). Arbitrary (off-grid) rotor angles: the same
+route, one STEP per angle (`static-3d.md` section 8.9; VERIFIED 2026-10-20 at 0.7 / 1.3 / 2.9 deg:
+psi 0.6 %, load torque 0.3-0.7 %, cogging within 0.019 N m of an independent 3D FE with a mortar
+sliding interface; the off-grid points lie on the cubic through JMAG's own 1 deg points to
+0.007 N m, which is this route's measured noise).
 
 ### 2c. 2D Static per-angle cases from rotated DXFs (radial machine)
 

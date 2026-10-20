@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.5
+
+- 3D Static at arbitrary (off-grid) rotor angles verified (JMAG-Designer 23.0, 2026-10-20) on the 12-slot / 10-pole
+  axial-flux PM machine of 0.3.2 (linear steel, slit coils with leads, full 360 deg, 621-622 k elements): no load at
+  0.7 / 1.3 / 2.9 deg and I_q = 5 A at 0.7 deg, one STEP per angle, against an independent 3D FE solver with a
+  mortar / interpolation sliding interface: psi 0.6 % (the on-grid offset), load torque 0.3-0.7 %, cogging within
+  0.019 N m (5.4 % of the 0.357 N m peak-to-peak; that solver pair scattered by up to 0.028 N m on the 1 deg grid).
+  JMAG's own consistency: the off-grid points lie on the periodic cubic through its on-grid points to 0.007 N m
+  (2 % of its peak-to-peak) and 1e-4 in psi, the measured noise of per-angle remeshing. 77-80 s per no-load case.
+  New `static-3d.md` section 8.9; `jmag-experiments` PMSM section 2b and README note. No code changes.
+
 ## 0.3.4
 
 - 2D cogging mesh convergence (JMAG-Designer 23.0, 2026-10-20) on the 12-slot / 10-pole radial SPM cross-section of

@@ -160,7 +160,10 @@ gap, and at the finest matched mesh cogging agreed to 5 % ([recipe](.claude/skil
 Also 2026-10-20: a deep-saturation point of the axial-flux machine (median tooth |B| 1.84 T, torque 0.69-0.71 of
 linear) gave psi 0.2-0.5 %, load torque 0.4-1.0 %; and a radial SPM with straight end windings as a full 3D Static
 model (radial arc magnets, one inflow-face `Current` per coil side) gave psi 0.1 %, load torque 0.2-0.6 %
-([3D workflow](.claude/skills/jmag-simulation/references/static-3d.md) sections 9.7, 10).
+([3D workflow](.claude/skills/jmag-simulation/references/static-3d.md) sections 9.7, 10). Arbitrary rotor angles
+of the axial-flux machine (0.7 / 1.3 / 2.9 deg, one STEP per angle) agreed with an independent solver's mortar
+sliding interface to psi 0.6 %, load torque 0.3-0.7 %, cogging 0.019 N m (5 % of peak-to-peak); JMAG's own
+per-angle remeshing noise there was 0.007 N m (section 8.9).
 
 ## How trust works: the feedback ladder
 
