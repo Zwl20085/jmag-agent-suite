@@ -118,7 +118,18 @@ side) against an independent solver:
 Expect 5 s mesh + 2 s solve per study at 20 k elements. Agreement with the independent solver at
 matched mesh sizes: psi 0.03 %, load torque 0.3 %. **Cogging is not converged at that size**:
 going from 20 k to 101 k elements moved the cogging peaks by 30 % while psi moved 0.3 %, so run a
-gap-mesh study before quoting cogging (section 2). Benign warning: "Check if there are one or more
+mesh study before quoting cogging (section 2). Measured on that machine (VERIFIED, 23.0, 2026-10-20;
+peak-to-peak T(1.5 deg) - T(4.5 deg), period 6 deg):
+- Refine the **tooth-tip corners at the slot opening together with the gap**. With the steel /
+  slot-air / coil part size held at 1.5 mm, refining the gap and magnet elements 0.5 -> 0.03125 mm
+  settled at 1.34 N m/m (19 k -> 1.3 M elements); refining the steel / slot air / coils as well
+  (0.5, 0.25, 0.125 mm) took it to 1.28, 1.21, 1.18 and, with the gap at 0.03125 mm, 1.15 N m/m
+  (3.1 M elements). An independent solver converged to within 5 % of that at the same sizes; the
+  value a psi / torque-tuned mesh gives can be 80 % high.
+- Each level is a part-size change only (`Part` mesh conditions); the zero-cogging angles (0, 3,
+  6 deg here) stayed below 0.06 N m/m at every level, a cheap noise check.
+- Cost per study: 2-3 s at 20 k elements, 130-190 s mesh + 80-120 s solve at 1.3 M, about 250 s + 185 s at
+  3.1 M (Ryzen 7 3800X): for the finest levels solve only the two extreme angles. Benign warning: "Check if there are one or more
 independent models that are surrounded by the symmetry boundaries" for a source-free bore disc
 whose whole boundary is `SymmetryBoundary` (its field is zero). Labels trap: a part straddling
 theta = 0 at a rotated angle can appear twice with the same name; rename the second `<name>__2`

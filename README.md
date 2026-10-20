@@ -127,8 +127,8 @@ API but not yet exercised on a real licence. **Recipe** = the skill walks the ag
 |---|---|---|---|---|---|
 | Geometry (DXF/STEP + labels) | Verified | Recipe | Recipe | Verified (2D DXF, 3D STEP) | Recipe |
 | Winding layout and FEM coils | Verified | Verified | Recipe | Verified (2D inductor) | Verified |
-| Static study, 2D (L, force, flux) | Verified (incl. radial SPM per-angle psi / torque) | Recipe | Recipe | Verified (inductor) | Recipe |
-| Static study, 3D (STEP, symmetry / periodic sector, `Current` inflow face, nodal torque, nonlinear B-H) | Verified (axial-flux PM, linear and nonlinear: psi, load torque, cogging per angle; periodic sector incl. torque) | Recipe | Recipe | Verified (transformer L matrix) | Recipe |
+| Static study, 2D (L, force, flux) | Verified (incl. radial SPM per-angle psi / torque, cogging mesh convergence) | Recipe | Recipe | Verified (inductor) | Recipe |
+| Static study, 3D (STEP, symmetry / periodic sector, `Current` inflow face, nodal torque, nonlinear B-H) | Verified (axial-flux PM, linear and nonlinear incl. deep saturation: psi, load torque, cogging per angle; periodic sector incl. torque; radial SPM with straight end windings) | Recipe | Recipe | Verified (transformer L matrix) | Recipe |
 | Transient with circuit and motion | Verified | Recipe | Recipe | Verified (2D inductor, no motion) | Recipe |
 | 3D transient, 3D windings / FEM coils, 3D field export | Script | Script | Script | Script | Script |
 | Setup lint, solver monitor, cancel | Verified | Verified | Verified | Verified | Verified |
@@ -154,8 +154,13 @@ independent FE; `Torque_Surface` does not work there (use the nodal `Torque` con
 (user B-H material, `NonlinearMaxIteration` / `NonlinearTolerance`, iterations from `jcgmntr`) gave psi 0.2-0.6 %,
 load torque 0.6 % at 5 A and 15 A, cogging peak-to-peak 0.03 %, and a loaded 180 deg sector showed that its torque
 is reported as the full-model value. The 2D Static SPM cell includes a 12-slot / 10-pole radial SPM cross-section,
-one rotated DXF per angle (2026-10-20): psi 0.03 %, load torque 0.3 % from an independent solver; its cogging was
-not mesh-converged at 20 k elements ([recipe](.claude/skills/jmag-experiments/references/pmsm.md)).
+one rotated DXF per angle (2026-10-20): psi 0.03 %, load torque 0.3 % from an independent solver; a mesh study of
+its cogging (19 k to 3.1 M elements) showed that the tooth-tip corners at the slot opening must be refined with the
+gap, and at the finest matched mesh cogging agreed to 5 % ([recipe](.claude/skills/jmag-experiments/references/pmsm.md)).
+Also 2026-10-20: a deep-saturation point of the axial-flux machine (median tooth |B| 1.84 T, torque 0.69-0.71 of
+linear) gave psi 0.2-0.5 %, load torque 0.4-1.0 %; and a radial SPM with straight end windings as a full 3D Static
+model (radial arc magnets, one inflow-face `Current` per coil side) gave psi 0.1 %, load torque 0.2-0.6 %
+([3D workflow](.claude/skills/jmag-simulation/references/static-3d.md) sections 9.7, 10).
 
 ## How trust works: the feedback ladder
 

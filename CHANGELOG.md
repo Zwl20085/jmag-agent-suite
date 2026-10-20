@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.3.4
+
+- 2D cogging mesh convergence (JMAG-Designer 23.0, 2026-10-20) on the 12-slot / 10-pole radial SPM cross-section of
+  0.3.3, gap / magnet element size 0.5 .. 0.03125 mm and steel / slot-air / coil size 1.5 .. 0.125 mm (19 k .. 3.1 M
+  elements): refining the gap alone converged the cogging to 1.34 N m/m at a 1.5 mm steel size, refining the
+  slot-opening corners too took it to 1.15 N m/m; against an independent solver at the finest matched mesh 5 %
+  (1.152 vs 1.094 N m/m). `jmag-experiments` PMSM section 2c rewritten as mesh guidance (refine the tooth-tip
+  corners with the gap, two angles for the expensive levels, cost per level).
+- Deep-saturation nonlinear 3D Static verified (2026-10-20) on an axial-flux PM variant (yoke 4 mm, tooth arc ratio
+  0.25, 8 mm / 1.4 T magnets, 100 A): median tooth |B| 1.84 T, 99th percentile 2.89 T (beyond the 2.2 T table end);
+  psi 0.2-0.5 %, load torque 0.4-1.0 % vs the independent solver, torque at 100 A 0.69-0.71 of the linear-steel
+  value in both tools; 10-12 nonlinear iterations (default limit 15 would have sufficed), 245-300 s solve at 832 k
+  elements. `static-3d.md` section 9.7.
+- 3D Static of a radial-flux SPM with straight end windings verified (2026-10-20): full machine from STEP, arc
+  magnets with `SetPattern("Radial")` + `SetOriginXYZ` + `SetAxisXYZ(0, 0, 1)` + `SetOrientation`, one InflowFace
+  `Current` per straight coil side with both end faces on `SymmetryBoundary` end planes, `SymmetryBoundary` on all
+  62 boundary faces, 721 k elements, 27 s mesh + 43 s solve: psi 0.1 %, load torque 0.2-0.6 % vs the independent
+  solver; nodal torque at zero-cogging positions scattered by 1.7 % of the load torque. New `static-3d.md` section
+  10; the magnet material's axis / origin method names recorded.
+- README coverage (2D cogging convergence, deep saturation, radial 3D Static with end windings);
+  `docs/jmag-facts.md` 2026-10-20 M11 section. No code changes.
+
 ## 0.3.3
 
 - Nonlinear 3D Static verified on JMAG-Designer 23.0 (2026-10-20) on the 12-slot / 10-pole axial-flux PM machine of

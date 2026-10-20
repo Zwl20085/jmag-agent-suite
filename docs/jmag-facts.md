@@ -140,3 +140,21 @@ cross-section (12 slots / 10 poles) as a 2D Static study. Details: `static-3d.md
   load torque < 0.1 %. Agreement with an independent solver at matched sizes: psi 0.03 %, load torque 0.3 %.
 - `rename_parts` reports `duplicate_names` when a DXF part straddling theta = 0 was written as two regions with the
   same label name (a magnet at a rotated angle); dedupe the labels (`<name>__2`) before renaming.
+
+## Cogging convergence, deep saturation, radial 3D with end windings (measured 2026-10-20, JMAG-Designer 23.0.01zv)
+
+Details: `jmag-experiments` -> `references/pmsm.md` section 2c; `static-3d.md` sections 9.7 and 10.
+
+- 2D Static radial SPM cogging (T(1.5) - T(4.5), 12 s / 10 p): gap / magnet size 0.5 -> 0.03125 mm at steel /
+  slot-air / coil size 1.5 mm: 1.90, 1.94 (0.25), 1.52 (0.125), 1.35 (0.0625), 1.34 N m/m (0.03125, 1.32 M
+  elements); steel / air / coil 0.5 / 0.25 / 0.125 mm at gap 0.0625: 1.28 / 1.21 / 1.18; gap 0.03125 + steel 0.125:
+  1.15 N m/m (3.13 M elements, about 250 s mesh + 185 s solve per study). The slot-opening corners need the refinement as much as the
+  gap. Independent solver at the finest matched sizes: 5 %.
+- Nonlinear 3D Static at bulk saturation (median tooth |B| 1.84 T, 99 % 2.89 T, table to 2.2 T): 10-12 iterations,
+  245-300 s at 832 k elements; psi 0.2-0.5 %, load torque 0.4-1.0 %, B-H / linear torque ratio 0.69-0.71 in both
+  tools.
+- 3D Static magnet `SetPattern("Radial")` with `SetOriginXYZ(0, 0, 0)` + `SetAxisXYZ(0, 0, 1)` + `SetOrientation`
+  on arc magnets: psi within 0.14 % of the independent solver. `Current` InflowFace on a straight coil side whose
+  two end faces lie on `SymmetryBoundary` planes: one secondary face selected, run OK. 721 k elements: 27 s mesh,
+  43 s solve. Load torque 0.2-0.6 %.
+

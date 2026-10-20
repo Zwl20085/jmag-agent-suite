@@ -356,3 +356,57 @@ the curve there) while torque stays linear in current (15 A / 5 A = 2.990 .. 3.0
    `jcgmntr` count (9.3) before trusting a result, and raise `NonlinearMaxIteration` when a step
    sits at the limit.
 3. Sector torque: factor 1, stator sign opposite (8.5).
+
+### 9.7 Deep saturation
+
+**VERIFIED (23.0, 2026-10-20)** on a variant of the section-8 machine built to saturate the teeth in
+bulk: stator yoke 4 mm, tooth arc ratio 0.25, magnets 8 mm thick, B_r 1.4 T, pole arc 0.9, gap
+0.6 mm, I_q = 100 A (30 turns), same M270-35A table, full 360 deg model, 832 k elements, the
+settings of 9.2. At 100 A and 3 deg the independent solver put the median tooth |B| at 1.84 T, the
+99th percentile at 2.89 T and the maximum at 3.18 T: far past the table's last point 2.2 T (that
+table ends on a slope of about mu0, so the extrapolation is near vacuum slope).
+
+| Quantity | Result |
+|---|---|
+| Nonlinear iterations (`jcgmntr`) | 10-12 per case (none at the limit of 50; the default 15 would have held) |
+| Solve / mesh | 245-300 s / 40 s per case; the same cases with `linear_2000` steel: 55 s |
+| psi_A vs the independent solver | 0.2-0.5 % (no load and 100 A, 0 and 3 deg) |
+| Load torque vs the independent solver | 0.4 % (0 deg), 1.0 % (3 deg) |
+| Torque at 100 A, B-H steel / linear steel | 0.706 / 0.693 (0 / 3 deg); the independent solver 0.700 / 0.684 |
+| No-load psi_A, B-H steel / linear steel | -25.4 % (the independent solver -26.1 %) |
+
+So JMAG's nonlinear 3D Static stays within 1 % of an independent Newton solver at a bulk-
+saturated point, the over-B-H-curve warning of 9.6 included.
+
+## 10. Radial-flux machine with straight end windings
+
+**VERIFIED (23.0, 2026-10-20)** on a 12-slot / 10-pole radial SPM (stack 10 mm, tooth coils
+whose sides run straight 5 mm past both stack ends, air around the overhang, linear steel mu_r
+2000, arc magnets B_r 1.2 T / mu_r 1.05 radial and alternating, 30 turns), full 360 deg model
+from one STEP per rotor angle (52 solids), 3 no-load angles and one load point, against an
+independent 3D FE solver of the same model.
+
+1. Import the STEP, rename by inside points, check volumes (6.5e-6 here).
+2. Arc magnets: on each magnet part `SetPattern("Radial")`, `SetOriginXYZ(0, 0, 0)`,
+   `SetAxisXYZ(0, 0, 1)`, `SetOrientation(True)` outward / `False` inward; read back `GetPattern()`.
+   The material object also offers `SetAxis`, `SetAxisFromReferenceTarget`, `SetOrigin`,
+   `SetReverseAxisDirection`, `GetAxis`, `GetOrigin` (method names listed with `dir()`).
+3. Coils without end turns: one `Current` condition per coil SIDE, `Turn` N, `DirectionType` 0
+   (InflowFace), the inflow face = that side's end face on one end plane (selected by position);
+   the other end face lies on the opposite end plane and JMAG finds it as the outflow face. Run the
+   current up one side and down the other (inflow at opposite ends); psi_coil = sum of the two
+   sides' `CoilFlux` (each oriented with its own current), psi_phase = sum polarity x psi_coil.
+4. `SymmetryBoundary` on every boundary face (stator outer cylinder, bore, both end planes with
+   all coil end faces): 62 faces here; selecting them by one point per face gave 62 of 62.
+5. Nodal `Torque` on the rotor iron + magnets; `AirRegion` 0; part sizes gap shells 0.4, magnets
+   0.75, steel / coils / air 1.5 mm: 721 k elements, 131 k nodes, 27 s mesh + 43 s solve.
+
+Results vs the independent solver (per metre of stack): psi_A 0.11-0.14 % at 0 / 3 / 6 deg no load
+and at I_q = 5 A; load torque 41.51 N m/m vs 41.25 (Maxwell, -0.6 %) and 41.57 (virtual work,
++0.2 %). At the zero-cogging positions 0 / 3 / 6 deg the nodal torque read +0.05 / -0.03 / -0.72
+N m/m (a new mesh per angle; 1.7 % of the load torque): quote 3D cogging only from a mesh study as
+in `jmag-experiments` -> `references/pmsm.md` section 2c.
+
+Trap (geometry side): STEP solids written one per region are separate shells; a CAD kernel that
+takes the combined boundary without gluing them first reports every internal face as boundary.
+Glue (e.g. gmsh `removeAllDuplicates`) before collecting the boundary-face points.
