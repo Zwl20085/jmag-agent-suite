@@ -7,13 +7,13 @@ Contents: 1 Display names and internal keys - 2 What jmag_get_result returns -
 
 | Display name | Internal key (`GetDataFromName`) | Columns | Notes |
 |---|---|---|---|
-| Torque | - (read by display name) | per Torque condition | sign follows the condition axis and rotation |
+| Torque | 2D: - (read by display name); 3D Static: `Torque` (verified 2026-10-20) | per Torque condition | sign follows the condition axis and rotation; 3D Static: nodal `Torque` condition, one row, N m (`Torque_Surface` aborts the run on parts) |
 | Circuit Current | `LineCurrent` | per circuit component | 3-phase source column = phase sum (0 when balanced) |
 | Circuit Voltage | `TerminalVoltage` | per probe/component | probe = motor-convention terminal voltage |
 | Coil Flux-Linkage | `FEMCoilFlux` | per FEM coil (circuit coil name) | whole phase, stack length included |
 | FEM Coil Inductance | `FEMCoilInductance` | per FEM coil | |
 | Stored Energy | `StoredEnergy` | `Total` (3D Static: one column per part + `Total`) | only with study property `Energy: 1` |
-| Magnetic Flux of Current Condition | `CoilFlux` (3D Static, verified 2026-10-19) | per `Current` condition | static studies; psi per condition, turns included, model value (half model: x2); a 0 A condition still reports it. That `CoilFlux` is this display table is inferred |
+| Magnetic Flux of Current Condition | `CoilFlux` (3D Static, verified 2026-10-19) | per `Current` condition | static studies; psi per condition, turns included, model value (half model with `SymmetryBoundary`: x2; `RotationPeriodicBoundary` sector: already full-model, factor 1, verified 2026-10-20); a 0 A condition still reports it. That `CoilFlux` is this display table is inferred |
 | Current of Current Condition | `CoilCurrent` (3D Static, verified 2026-10-19) | per `Current` condition | static studies |
 | Joule Loss | - (unverified key) | per conducting part | eddy/FEM-conductor loss |
 | Iron Loss, Hysteresis Loss | - (unverified key) | per part | from loss studies / loss conditions |

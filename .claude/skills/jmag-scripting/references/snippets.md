@@ -18,6 +18,10 @@ Contents
 - S-3D-3 `SymmetryBoundary` on faces picked by position - VERIFIED (3D, 2026-10-19)
 - S-3D-4 3D mesh controls, part sizes and the energy table - VERIFIED (3D, 2026-10-19)
 - S-3D-5 Read `CoilFlux` / `CoilCurrent` / `StoredEnergy` - VERIFIED (3D, 2026-10-19)
+- S-3D-6 `RotationPeriodicBoundary` on one cut plane (anti-periodic sector) - VERIFIED (3D, 2026-10-20)
+- S-3D-7 Custom linear magnet and per-part magnetisation direction - VERIFIED (3D, 2026-10-20)
+- S-3D-8 Nodal `Torque` on the rotor parts and the `Torque` table - VERIFIED (3D, 2026-10-20)
+- S-3D-9 List the condition types and their property tables - VERIFIED (3D, 2026-10-20)
 
 Rules for this file: every JMAG call is a member listed in the JMAG 23.0 script reference
 inventory or already exercised by the bridge's `worker/ops.py`. **VERIFIED** = the same calls
@@ -26,7 +30,9 @@ run through the bridge: use on a copy, read back, report what happened, and mark
 
 **VERIFIED (3D, 2026-10-19)** = run live through `jmag_exec_python` on JMAG-Designer 23.0 in two 3D
 Static transformer studies whose inductances matched independent FE within 0.9 % (workflow and
-traps: `jmag-simulation` -> `references/static-3d.md`).
+traps: `jmag-simulation` -> `references/static-3d.md`). **VERIFIED (3D, 2026-10-20)** = run live the
+same way on a 12-slot / 10-pole axial-flux PM machine (13 rotor positions, one periodic sector) whose
+flux linkage, load torque and cogging matched independent FE within 0.6 % (`static-3d.md` section 8).
 
 Each snippet assumes S1 is pasted above it (the worker does not share state between calls).
 Globals available: `app`, `designer`, `ctx`, `OpError`, `result`.
@@ -276,7 +282,9 @@ result = {"Turn": c.GetValue("Turn"), "Current": c.GetValue("Current"),
           "secondary_faces": c.GetSecondarySelection().NumFaces()}   # expect 1
 ```
 Run fails with "Cannot find flow-out face ... not set on Symmetry boundary (3D)" when the coil ends
-are inside the air. Current enters through the selected face: flip the face to flip the sign.
+are inside the air. Also VERIFIED (2026-10-20) for a slit tooth coil whose two leads end on the outer
+wall of the air box, with `SymmetryBoundary` on those lead end faces; negative `Current` and
+`UniformCurrent` 0 work too. Current enters through the selected face: flip the face to flip the sign.
 
 ## S-3D-3 `SymmetryBoundary` on faces picked by position - VERIFIED (3D, 2026-10-19)
 
@@ -292,9 +300,9 @@ if n != len(pts):
                   "a face shared by two solids selects both; pick points on external faces")
 result = {"faces": n}
 ```
-The boundary type was left at JMAG's default, which acted flux-parallel (B tangential) in both
-transformers. The property that sets the type explicitly is UNVERIFIED: look it up with
-`jmag_get_properties(study='Ip', kind='condition', name='cut_plane', with_help=true)` and read it back.
+`SymmetryBoundary` has no properties (S-3D-9, 2026-10-20): it is always flux-parallel (B tangential).
+A face without any condition is the natural boundary (flux normal); for an `A_t = 0` outer box put
+`SymmetryBoundary` on every outer face.
 
 ## S-3D-4 3D mesh controls, part sizes and the energy table - VERIFIED (3D, 2026-10-19)
 
@@ -333,3 +341,101 @@ result = {"tables": out, "elements": rep.NumElements(), "nodes": rep.NumVertices
 `CoilFlux` has one column per `Current` condition, turns included, and is the model value (half
 model: multiply by 2 for the device; no JMAG conversion factor was used). A 0 A condition still
 reports its flux, so one study per excited winding gives a full L matrix.
+
+## S-3D-6 `RotationPeriodicBoundary` on one cut plane (anti-periodic sector) - VERIFIED (3D, 2026-10-20)
+
+180 deg sector of a 12-slot / 10-pole machine (5 poles: anti-periodic). Points: one per face of the
+cut plane theta = 0 (here y = 0, x > 0), from the labels JSON. Nothing goes on the other cut plane;
+`SymmetryBoundary` (S-3D-3) on the remaining outer faces.
+
+```python
+s = find_study(app.GetCurrentModel(), "NL")
+c = need(s.CreateCondition("RotationPeriodicBoundary", "periodic"), "RotationPeriodicBoundary")
+c.SetXYZPoint("Origin", 0.0, 0.0, 0.0)
+c.SetXYZPoint("Axis", 0.0, 0.0, 1.0)
+c.SetValue("Angle", 180.0)                    # sector angle, deg
+c.SetValue("AutoPeriodicFromWinding", 0)
+c.SetValue("BoundaryType", 1)                 # keys Normal / Reverse / AxialReverse; 1 = Reverse = anti-periodic
+pts = [(60.0, 0.0, 0.0), (60.0, 0.0, 8.0), (60.0, 0.0, -8.0)]   # example: one point per cut-plane face
+for (x, y, z) in pts:
+    sel = c.GetSelection(); sel.Clear(); sel.SelectFaceByPosition(x, y, z); c.AddSelected(sel)
+result = {"faces": c.GetSelection().NumFaces(), "points": len(pts), "Angle": c.GetValue("Angle"),
+          "BoundaryType": c.GetValue("BoundaryType"), "keys": list(c.GetKeyNames("BoundaryType") or [])}
+```
+`CoilFlux` and `StoredEnergy` of the sector come out as full-model values (no symmetry factor):
+psi within 0.03-0.06 % of the full model. `FullModelConversion` / `ConversionFactor` were left at
+their defaults (UNVERIFIED); the torque of a sector was not checked at a loaded position.
+
+## S-3D-7 Custom linear magnet and per-part magnetisation direction - VERIFIED (3D, 2026-10-20)
+
+```python
+lib = app.GetMaterialLibrary()
+lib.CreateCustomMaterial("PM_linear", "Custom Materials")
+um = lib.GetUserMaterial("PM_linear")
+if um is None or not um.IsValid():
+    raise OpError("no material-editor view of PM_linear")
+um.SetValue("MagneticPropertyType", 1)        # magnet
+um.SetValue("MagnetPermeabilityType", 6)      # Linear(Br)
+um.SetValue("ResidualMagneticFluxDensity", 1.2)   # B_r, T
+um.SetValue("MagnetPermeability", 1.05)       # recoil mu_r
+s = find_study(app.GetCurrentModel(), "NL")
+out = {}
+for part, sign in (("Magnet_0", 1), ("Magnet_1", -1)):   # alternating axial magnets
+    s.SetMaterialByName(part, "PM_linear")
+    mt = s.GetMaterial(part)
+    mt.SetPattern("Parallel")
+    mt.SetDirectionXYZ(0.0, 0.0, float(sign))
+    d = mt.GetDirection()
+    out[part] = {"material": mt.GetName(), "pattern": mt.GetPattern(), "direction": [d.GetX(), d.GetY(), d.GetZ()]}
+result = {"IsMagnet": bool(um.IsMagnet()), "Br": um.GetValue("ResidualMagneticFluxDensity"),
+          "mu_r": um.GetValue("MagnetPermeability"), "magnets": out}
+```
+The library `NdFeB_Br=1.2(T)` gave the same psi to 1e-8. Reversing every direction negated psi
+exactly. Creating the same custom name twice was not tested: use a fresh project or a new name.
+
+## S-3D-8 Nodal `Torque` on the rotor parts and the `Torque` table - VERIFIED (3D, 2026-10-20)
+
+```python
+s = find_study(app.GetCurrentModel(), "NL")
+c = need(s.CreateCondition("Torque", "T_rotor"), "Torque")
+c.SetXYZPoint("Origin", 0.0, 0.0, 0.0)
+c.SetXYZPoint("Axis", 0.0, 0.0, 1.0)          # torque about +z
+sel = c.GetSelection(); sel.Clear()
+for p in ("Rotor_Iron", "Magnet_0", "Magnet_1"):
+    sel.SelectPart(p)
+c.AddSelected(sel)
+result = {"parts": c.GetSelection().NumParts(), "properties": list(c.GetPropertyNames() or [])}
+```
+After the run:
+```python
+rt = s.GetResultTable()
+d = rt.GetDataFromName("Torque")
+if d is None or not d.IsValid() or d.GetRows() == 0:
+    raise OpError("Torque table empty: no Torque condition or no results")
+cols = [d.GetColName(j) for j in range(d.GetCols())]
+result = dict((cn, [d.GetValue(r, cn) for r in range(d.GetRows())]) for cn in cols)   # one row in Static
+```
+`ExpandTarget` 1 gave identical numbers. Do not use `Torque_Surface`: it takes no parts (`NumParts`
+0, Run aborts "The target is not specified for the electromagnetic force or torque calculation
+condition"), and an internal gap face picked by position selects both sides, which cancel.
+Do not `GetValue` a property missing from `GetPropertyNames()` (`TargetType`): it fails the call.
+
+## S-3D-9 List the condition types and their property tables - VERIFIED (3D, 2026-10-20)
+
+Probes a throw-away study (it creates one condition per type asked for: delete the study after).
+
+```python
+s = find_study(app.GetCurrentModel(), "probe")
+out = {"condition_types": list(s.GetConditionTypes() or []), "tables": {}}
+for t in ("RotationPeriodicBoundary", "Torque", "Torque_Surface", "SymmetryBoundary", "Current"):
+    if t not in out["condition_types"]:
+        out["tables"][t] = None
+        continue
+    c = s.CreateCondition(t, "probe_" + t)
+    if c is None or not c.IsValid():
+        app.ClearError(); out["tables"][t] = "create failed"; continue
+    out["tables"][t] = {"names": list(c.GetPropertyNames() or []), "table": c.GetPropertyTable()}
+result = out
+```
+3D Static on 23.0: 29 types, no `RotationMotion` (list in `jmag-simulation` ->
+`references/static-3d.md` section 8.1). `SymmetryBoundary` has no properties.

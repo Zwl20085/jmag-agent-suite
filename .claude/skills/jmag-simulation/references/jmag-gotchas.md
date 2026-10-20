@@ -83,3 +83,19 @@ them lets you interpret what you see.
 - Imported STEP parts are named `<assembly>/<product>`; rename by inside point.
 - `jmag_add_current` writes `Direction2D` and is for 2D studies; the 3D `Current` goes through
   `jmag_exec_python` (snippet S-3D-2).
+
+## 3D Static, rotating machines (verified 2026-10-20; `references/static-3d.md` section 8)
+- No `RotationMotion` in a Static study: one rotor angle per case. Write one merged STEP per angle and
+  re-import it (~80 s per case at ~620 k elements, ~160 s with a load study).
+- `SymmetryBoundary` has no type property; it is always flux-parallel. Faces with no condition are
+  natural (flux normal): for an `A_t = 0` box put `SymmetryBoundary` on every outer face.
+- `RotationPeriodicBoundary` `BoundaryType` 1 (Reverse) = anti-periodic; one cut plane is enough. A
+  sector's `CoilFlux` / `StoredEnergy` are already full-model values: no symmetry factor.
+- Closed tooth coils need a slit and two leads to the outer wall for InflowFace (lead end faces under
+  `SymmetryBoundary`).
+- `Torque_Surface` takes no parts and the run aborts; an internal face picked by position selects both
+  sides and cancels. Use the nodal `Torque` condition (result key `Torque`).
+- `GetValue` of a property the condition does not have (`TargetType` on `Torque`) fails the call:
+  check `GetPropertyNames()` first.
+- Per-angle meshes make cogging noisy (+-0.035 N m on a 0.33 N m peak-to-peak here); `StoredEnergy`
+  with magnets is not comparable with another tool's 1/2 integral(nu B^2).

@@ -128,7 +128,7 @@ API but not yet exercised on a real licence. **Recipe** = the skill walks the ag
 | Geometry (DXF/STEP + labels) | Verified | Recipe | Recipe | Verified (2D DXF, 3D STEP) | Recipe |
 | Winding layout and FEM coils | Verified | Verified | Recipe | Verified (2D inductor) | Verified |
 | Static study, 2D (L, force, flux) | Verified | Recipe | Recipe | Verified (inductor) | Recipe |
-| Static study, 3D (STEP, half model, `Current` inflow face) | Recipe | Recipe | Recipe | Verified (transformer L matrix) | Recipe |
+| Static study, 3D (STEP, symmetry / periodic sector, `Current` inflow face, nodal torque) | Verified (axial-flux PM: psi, load torque, cogging per angle; periodic sector) | Recipe | Recipe | Verified (transformer L matrix) | Recipe |
 | Transient with circuit and motion | Verified | Recipe | Recipe | Verified (2D inductor, no motion) | Recipe |
 | 3D transient, 3D windings / FEM coils, 3D field export | Script | Script | Script | Script | Script |
 | Setup lint, solver monitor, cancel | Verified | Verified | Verified | Verified | Verified |
@@ -144,9 +144,12 @@ API but not yet exercised on a real licence. **Recipe** = the skill walks the ag
 | Force / NVH export | Script | Script | Script | n/a | Script |
 
 The verified column is the [12-slot / 4-pole SPM example](examples/spm_motor) and the self-test C-core; the table doubles
-as the roadmap. "Verified" entries on other device families mean the step does not depend on the device. The 3D Static row
-is two linear transformers (E core, pot core) run on 23.0 on 2026-10-19, L within 0.9 % of independent FE; transformer
-OC/SC tests are recipes, and nothing 3D beyond Static has been run
+as the roadmap. "Verified" entries on other device families mean the step does not depend on the device. The 3D Static row's
+transformer cell is two linear transformers (E core, pot core) run on 23.0 on 2026-10-19, L within 0.9 % of independent FE; transformer
+OC/SC tests are recipes, and nothing 3D beyond Static has been run. The SPM cell of that row is a 12-slot / 10-pole
+axial-flux PM machine run on 2026-10-20 (13 rotor positions as separate cases, a 180 deg `RotationPeriodicBoundary`
+sector verified against the full model): psi 0.2-0.6 %, load torque 0.3 %, cogging peak-to-peak 0.3 % from
+independent FE; `Torque_Surface` does not work there (use the nodal `Torque` condition)
 ([workflow](.claude/skills/jmag-simulation/references/static-3d.md)).
 
 ## How trust works: the feedback ladder

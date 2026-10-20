@@ -30,7 +30,9 @@ numbers, whether the model is working **normally or abnormally**.
    -> `jmag_list_parts` (nothing unnamed) -> `jmag_model_image` if unsure.
 4. `jmag_create_study`. Static2D takes no circuit; circuits and FEM coils need Transient/Frequency.
    **3D Static** (STEP model, `Current` condition with an inflow face, half model with
-   `SymmetryBoundary`): follow `references/static-3d.md` step by step - verified on 23.0.
+   `SymmetryBoundary`): follow `references/static-3d.md` step by step - verified on 23.0. Rotating
+   machines in 3D Static (magnets, slit coils with leads, nodal `Torque`, periodic sector, one case
+   per rotor angle): its section 8.
 5. Physics: `jmag_set_material` (magnets with `orientation`), stack length
    `jmag_set_properties(kind='study', values={'ModelThickness': L_mm})`, excitation
    (static: `jmag_add_current`; transient: `jmag_circuit_quick` + `jmag_add_fem_coil`, or

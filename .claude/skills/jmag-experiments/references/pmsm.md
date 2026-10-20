@@ -69,6 +69,24 @@ pk-pk: integer-slot q = 1 without skew 3-10 % of rated torque; well-chosen fract
 (high LCM) < 1-2 %. Cogging is a small difference of large forces: do a mesh study (refine the
 gap, < 5 % change in pk-pk) before believing it.
 
+### 2b. 3D Static per-angle cases (cogging, torque, psi)
+
+`jmag_experiment` works on a 2D transient study. For a machine that needs 3D (axial flux, end
+effects) use 3D Static cases instead, one rotor angle each (`jmag-simulation` ->
+`references/static-3d.md` section 8; VERIFIED on 23.0, 2026-10-20, 12-slot / 10-pole axial-flux PM):
+1. One merged STEP per angle (stator + rotated rotor + air, gap split into stator / rotor slabs);
+   >= 6 angles per cogging period plus the period end as a repeat check.
+2. Per case: import, rename, materials (magnets: S-3D-7), `SymmetryBoundary` on every outer face
+   or a `RotationPeriodicBoundary` sector (S-3D-6), slit coils with leads + `Current` (S-3D-2),
+   nodal `Torque` on the rotor (S-3D-8; not `Torque_Surface`), mesh, run, read `Torque` and
+   `CoilFlux`. Load: duplicate the study, currents from dq at that angle.
+3. psi_phase = sum polarity x `CoilFlux`; back-EMF from d psi / d theta x omega across the cases.
+
+Expect ~80 s per no-load case at ~620 k elements. Each angle has its own mesh, so cogging carries
+mesh noise (+-0.035 N m on 0.33 N m pk-pk there; the two ends of a period differed by 0.011 N m):
+report pk-pk over the period and the end-of-period mismatch as the noise level. Achieved vs an
+independent 3D FE: psi 0.2-0.6 %, load torque 0.3 %, cogging pk-pk 0.3 %.
+
 ## 3. Open-circuit back-EMF
 
 One call: `jmag_experiment(kind='back_emf', params={"poles": 2p, "rpm": n})`. Manual: same study with source

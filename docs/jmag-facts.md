@@ -73,3 +73,36 @@ Workflow and snippets: `.claude/skills/jmag-simulation/references/static-3d.md`.
 - Accuracy: L within 0.5 % (E core) and 0.85 % (pot core) of an independent 3D FE solver; pot core
   L_m 10.37 mH vs an axisymmetric FE reference of 10.42 mH. JMAG needed ~3x the elements for the same value.
 - `quit_app` left no `designer.exe` / `modeller.exe` behind; no modal dialog or crash in any 3D run.
+
+## 3D Static, rotating PM machine (measured 2026-10-20, JMAG-Designer 23.0.01zv)
+
+Axial-flux PM machine, 12 slots / 10 poles, linear materials, full 360 deg model (622 k elements) in 13 rotor
+positions plus a 180 deg periodic sector. Details: `.claude/skills/jmag-simulation/references/static-3d.md` section 8.
+
+- `GetConditionTypes()` of a 3D Static study lists 29 types, among them `RotationPeriodicBoundary`,
+  `TranslationPeriodicBoundary`, `Torque`, `Torque_Surface`, `Current`, `CurrentDensity`, `VectorPotentialBoundary`;
+  there is no `RotationMotion`, so each rotor position is its own case (one merged STEP per angle, re-imported).
+- `SymmetryBoundary` has no properties and is always flux-parallel. A face with no condition is natural (flux normal);
+  to reproduce an `A_t = 0` outer box put `SymmetryBoundary` on every outer face.
+- `RotationPeriodicBoundary` (`Axis`, `Origin`, `Angle`, `AutoPeriodicFromWinding`, `BoundaryType` with keys
+  `Normal` / `Reverse` / `AxialReverse`): `BoundaryType` 1 = Reverse = anti-periodic, set on the faces of one cut
+  plane only. A 180 deg sector (6 slots / 5 poles) agreed with the full model to 0.03-0.06 % in flux linkage.
+  The sector's `CoilFlux` and `StoredEnergy` are reported already converted to the full model (factor 1, unlike the
+  x2 of the 2026-10-19 half model with `SymmetryBoundary`). `FullModelConversion` / `ConversionFactor` untouched.
+- Custom linear magnet: `MagneticPropertyType` 1, `MagnetPermeabilityType` 6 (Linear(Br)),
+  `ResidualMagneticFluxDensity`, `MagnetPermeability` read back fine; per part `SetPattern("Parallel")` +
+  `SetDirectionXYZ(0, 0, +-1)` + `GetDirection()`. Library `NdFeB_Br=1.2(T)` = custom B_r 1.2 T / mu_r 1.05 to 1e-8;
+  reversing every magnet negates psi exactly.
+- Closed tooth coils: slit each coil and run two leads to the outer wall; `Current` InflowFace with the lead end faces
+  on outer-wall `SymmetryBoundary` faces works. Negative `Current` and `UniformCurrent` 0 / 1 both work (0 vs 1:
+  0.3 %).
+- Torque: nodal `Torque` (`Origin` / `Axis`, `ExpandTarget` without effect) on the rotor parts, result key `Torque`.
+  `Torque_Surface` rejects part selections and the run aborts ("The target is not specified for the electromagnetic
+  force or torque calculation condition"); a mid-gap face selected by position picks both sides and cancels
+  (~1e-14 N m).
+- `GetValue` of a property a condition lacks (`TargetType` on `Torque`) logs an error and fails the worker call.
+- Timing (Ryzen 7 3800X, ~620 k elements): ~80 s per no-load case, ~160 s with a load case. Cogging from per-angle
+  meshes carries +-0.035 N m mesh noise (the identical positions 0 and 6 deg gave -0.005 / +0.006 N m).
+- `StoredEnergy` with magnets is not 1/2 integral(nu B^2) (JMAG 3.82 J vs 9.27 J from another solver): do not compare
+  energies across tools when magnets are present.
+- Accuracy vs an independent 3D FE solver: flux linkage 0.2-0.6 %, load torque 0.3 %, cogging peak-to-peak 0.3 %.
