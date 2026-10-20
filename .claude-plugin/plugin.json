@@ -2,7 +2,7 @@
   "name": "jmag",
   "displayName": "JMAG Agent Suite",
   "description": "Drive JMAG-Designer from Claude: MCP server, physics health checks and skills for electromagnetic FEA of electric machines.",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "author": { "name": "Zwl20085" },
   "homepage": "https://github.com/Zwl20085/jmag-agent-suite",
   "repository": "https://github.com/Zwl20085/jmag-agent-suite",

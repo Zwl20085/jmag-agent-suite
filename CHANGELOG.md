@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.2
+
+- 3D Static verified for a rotating PM machine on JMAG-Designer 23.0 (2026-10-20): a 12-slot / 10-pole axial-flux PM
+  machine, full 360 deg model in 13 rotor-position cases plus a 180 deg periodic sector, against an independent 3D FE
+  solver: flux linkage 0.2-0.6 %, load torque 0.3 %, cogging peak-to-peak 0.3 %. New section 8 "Rotating machines in
+  3D Static" in `jmag-simulation/references/static-3d.md`: the 29 condition types (no `RotationMotion`) and their
+  property names, `SymmetryBoundary` (no properties, always flux parallel; no condition = natural),
+  `RotationPeriodicBoundary` `Reverse` = anti-periodic on one cut plane with sector results already converted to the
+  full model, custom Linear(Br) magnets and per-part direction, slit tooth coils with leads to the outer wall, nodal
+  `Torque` (verified) vs `Torque_Surface` (does not work: run aborts on parts, internal face cancels), one STEP per
+  rotor angle with timings, mesh-noise in per-angle cogging, `StoredEnergy` not comparable across tools with magnets.
+- `jmag-scripting` snippets S-3D-6 to S-3D-9 (periodic sector, linear magnet + direction, nodal torque + `Torque`
+  table, condition-type dump), all VERIFIED; S-3D-2 / S-3D-3 notes updated (lead faces on the outer wall,
+  `SymmetryBoundary` has no type property).
+- Docs: `docs/jmag-facts.md` 2026-10-20 section; gotchas; `jmag-experiments` PMSM section 2b (3D Static per-angle
+  cases); `jmag-postprocess` result keys (`Torque` in 3D Static, sector `CoilFlux` factor 1); README coverage row for
+  3D Static now verified for an SPM machine. No code changes.
+
 ## 0.3.1
 
 - 3D Static verified on JMAG-Designer 23.0 (2026-10-19): two linear transformers (E55/28/21 with a 1 mm gap, P66/56
