@@ -40,6 +40,7 @@ MCP client --stdio--> server.py (Python >=3.10, MCP SDK)
                         |-- health.py         pure rules + physics invariants (unit-tested)
                         |-- experiments.py    server-side orchestration of standard tests over ops
                         |-- estimate.py / winding.py / units.py   analytic layer (pure, unit-tested)
+                        |-- cad3d.py           STEP product / solid names before a 3D import (pure, unit-tested)
                         |-- plotting.py / reporting.py / compare.py   post-processing (pure)
                         |-- solver_monitor.py  reads jmonitor/jcgmntr/Designer.log, kills ExecSolver
                         |-- winui.py + ps/*.ps1  UI Automation: dialogs, clicks, window screenshots
