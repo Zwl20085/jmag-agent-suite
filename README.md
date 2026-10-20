@@ -125,10 +125,12 @@ API but not yet exercised on a real licence. **Recipe** = the skill walks the ag
 
 | Step | SPM | IPM / SynRM | Induction | Transformer / inductor | Actuator / WPT |
 |---|---|---|---|---|---|
-| Geometry (DXF/STEP + labels) | Verified | Recipe | Recipe | Verified | Recipe |
-| Winding layout and FEM coils | Verified | Verified | Recipe | Verified | Verified |
-| Static study (L, force, flux) | Verified | Recipe | Recipe | Verified | Recipe |
-| Transient with circuit and motion | Verified | Recipe | Recipe | Verified | Recipe |
+| Geometry (DXF/STEP + labels) | Verified | Recipe | Recipe | Verified (2D DXF, 3D STEP) | Recipe |
+| Winding layout and FEM coils | Verified | Verified | Recipe | Verified (2D inductor) | Verified |
+| Static study, 2D (L, force, flux) | Verified | Recipe | Recipe | Verified (inductor) | Recipe |
+| Static study, 3D (STEP, half model, `Current` inflow face) | Recipe | Recipe | Recipe | Verified (transformer L matrix) | Recipe |
+| Transient with circuit and motion | Verified | Recipe | Recipe | Verified (2D inductor, no motion) | Recipe |
+| 3D transient, 3D windings / FEM coils, 3D field export | Script | Script | Script | Script | Script |
 | Setup lint, solver monitor, cancel | Verified | Verified | Verified | Verified | Verified |
 | Physics invariants (KVL, energy, power balance) | Verified | Verified | Verified | Verified | Verified |
 | Cogging, back-EMF, load point, Ld/Lq (`jmag_experiment`) | Verified | Recipe | Recipe | Recipe | Recipe |
@@ -142,7 +144,10 @@ API but not yet exercised on a real licence. **Recipe** = the skill walks the ag
 | Force / NVH export | Script | Script | Script | n/a | Script |
 
 The verified column is the [12-slot / 4-pole SPM example](examples/spm_motor) and the self-test C-core; the table doubles
-as the roadmap. "Verified" entries on other device families mean the step does not depend on the device.
+as the roadmap. "Verified" entries on other device families mean the step does not depend on the device. The 3D Static row
+is two linear transformers (E core, pot core) run on 23.0 on 2026-10-19, L within 0.9 % of independent FE; transformer
+OC/SC tests are recipes, and nothing 3D beyond Static has been run
+([workflow](.claude/skills/jmag-simulation/references/static-3d.md)).
 
 ## How trust works: the feedback ladder
 
@@ -243,6 +248,7 @@ MCP client --stdio--> server.py (Python >= 3.10)       tools, run jobs, orchestr
                         |-- worker "runner" (per solve)                    (both on JMAG's own Python 3.8, ProcessLink API)
                         |-- health.py        pre/post rules, physics invariants   (pure, unit-tested)
                         |-- estimate.py winding.py units.py                 analytic layer (pure)
+                        |-- dxf.py cad3d.py                                 DXF writer, STEP product/solid name check (pure)
                         |-- plotting.py reporting.py compare.py             post-processing (pure)
                         |-- solver_monitor.py winui.py launcher.py          progress, dialogs, screenshots, detached start
                         `-- docs_index.py                                   search the installed JMAG manual and API

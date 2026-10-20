@@ -16,7 +16,10 @@ imports it in one call. The script is the single source of truth for dimensions.
      `jmag_bridge.dxf.Dxf`: `polyline(points, closed=True)`, `arc(center, r, a0, a1)` (CCW, deg),
      `line`, `circle`, `annular_sector(r_in, r_out, a0, a1)`.
    - 3D: STEP via CadQuery/build123d/gmsh-OCC/FreeCAD; name each solid so JMAG part names are
-     readable.
+     readable (JMAG shows `<assembly>/<product>`; gmsh's own STEP writer drops the names). Check
+     the file with `python -m jmag_bridge.cad3d model.step` before import. A model with closed
+     windings for a 3D Static study must be a **half model cut through the winding axis** so the
+     coil end faces lie on the symmetry plane (`jmag-simulation` -> `references/static-3d.md`).
 2. **A labels JSON** with one point strictly inside every part, plus everything the simulation
    needs later (winding layout, magnet polarity/direction, rotor part list, air parts to
    suppress, key dimensions). Schema: `references/labels-schema.md`. The agent then calls
@@ -86,5 +89,8 @@ suggests in its slot map, so its `labels_coils` output plugs straight into `jmag
 3. Suppress the parts the labels mark as `suppress` (air gap) in each study.
 4. Parametric changes: edit parameters, regenerate, import into a new model or project (keep the
    old one for comparison). Geometry variables in sweeps: `jmag-parametric-optimisation`.
-5. 3D: `jmag_import_cad(path, unit="mm")` -> compare volumes with the CAD -> rename by points or
-   ids. 3D coil and face conditions are covered in `jmag-experiments` (actuator reference).
+5. 3D: `python -m jmag_bridge.cad3d model.step` (names, solids, warnings) ->
+   `jmag_import_cad(path, unit="mm")` -> compare volumes with the CAD -> rename by `[x, y, z]`
+   points. Put in the labels JSON what the 3D study needs and JMAG cannot read from the STEP: a
+   point on every face of the cut plane / outer boundary, and each coil's inflow end face. 3D coil
+   and face conditions: `jmag-simulation` -> `references/static-3d.md` (verified).

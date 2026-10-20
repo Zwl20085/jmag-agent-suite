@@ -29,6 +29,8 @@ numbers, whether the model is working **normally or abnormally**.
 3. Geometry: `jmag_import_dxf` / `jmag_import_cad` -> `jmag_rename_parts` from the labelled points
    -> `jmag_list_parts` (nothing unnamed) -> `jmag_model_image` if unsure.
 4. `jmag_create_study`. Static2D takes no circuit; circuits and FEM coils need Transient/Frequency.
+   **3D Static** (STEP model, `Current` condition with an inflow face, half model with
+   `SymmetryBoundary`): follow `references/static-3d.md` step by step - verified on 23.0.
 5. Physics: `jmag_set_material` (magnets with `orientation`), stack length
    `jmag_set_properties(kind='study', values={'ModelThickness': L_mm})`, excitation
    (static: `jmag_add_current`; transient: `jmag_circuit_quick` + `jmag_add_fem_coil`, or
@@ -71,6 +73,8 @@ toolchain itself is in doubt, `jmag_self_test`.
 Read `references/jmag-gotchas.md` before your first study in a session. The short version:
 
 - Static2D refuses circuits; the `Current` condition is the static coil excitation.
+- 3D `Current` on a closed winding: `DirectionType` Vector gives zero current without an error;
+  use a half model + InflowFace (`references/static-3d.md`).
 - `ModelThickness` defaults to 1 mm in 2D - torque/flux/EMF scale with it.
 - Rotating machines need a slide mesh (`MeshType=1`, `AutoSlide=1`, `AutoDivision=0` plus your
   `CircumferentialDivision`) and nothing user-drawn may bridge rotor and stator: suppress a DXF

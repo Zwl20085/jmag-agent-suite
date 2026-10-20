@@ -113,10 +113,12 @@ claude mcp add jmag --scope user -- "$PWD\.venv\Scripts\python.exe" -m jmag_brid
 
 | 步骤 | SPM | IPM / SynRM | 感应电机 | 变压器 / 电感 | 作动器 / WPT |
 |---|---|---|---|---|---|
-| 几何（DXF/STEP + 标签） | Verified | Recipe | Recipe | Verified | Recipe |
-| 绕组布局和 FEM 线圈 | Verified | Verified | Recipe | Verified | Verified |
-| 静态研究（L、力、磁链） | Verified | Recipe | Recipe | Verified | Recipe |
-| 带电路和运动的瞬态 | Verified | Recipe | Recipe | Verified | Recipe |
+| 几何（DXF/STEP + 标签） | Verified | Recipe | Recipe | Verified（二维 DXF、三维 STEP） | Recipe |
+| 绕组布局和 FEM 线圈 | Verified | Verified | Recipe | Verified（二维电感） | Verified |
+| 二维静态研究（L、力、磁链） | Verified | Recipe | Recipe | Verified（电感） | Recipe |
+| 三维静态研究（STEP、半模型、`Current` 流入面） | Recipe | Recipe | Recipe | Verified（变压器电感矩阵） | Recipe |
+| 带电路和运动的瞬态 | Verified | Recipe | Recipe | Verified（二维电感，无运动） | Recipe |
+| 三维瞬态、三维绕组 / FEM 线圈、三维场导出 | Script | Script | Script | Script | Script |
 | 设置检查（lint）、求解监控、取消 | Verified | Verified | Verified | Verified | Verified |
 | 物理不变量（KVL、能量、功率平衡） | Verified | Verified | Verified | Verified | Verified |
 | 齿槽转矩、空载反电动势、工况点、Ld/Lq（`jmag_experiment`） | Verified | Recipe | Recipe | Recipe | Recipe |
@@ -129,7 +131,7 @@ claude mcp add jmag --scope user -- "$PWD\.venv\Scripts\python.exe" -m jmag_brid
 | 热分析 | Script | Script | Script | Script | Script |
 | 力 / NVH 导出 | Script | Script | Script | n/a | Script |
 
-“已验证”一列对应 [12 槽 / 4 极 SPM 示例](examples/spm_motor)和自检用 C 形铁心；这张表同时也是路线图。其他器件类型上标为“Verified”的条目，表示该步骤与器件类型无关。
+“已验证”一列对应 [12 槽 / 4 极 SPM 示例](examples/spm_motor)和自检用 C 形铁心；这张表同时也是路线图。其他器件类型上标为“Verified”的条目，表示该步骤与器件类型无关。三维静态一行对应 2026-10-19 在 23.0 上运行的两个线性变压器（E 形铁心、罐形铁心），电感与独立有限元结果相差在 0.9 % 以内；变压器开路 / 短路试验仍是流程（Recipe），三维静态以外的三维分析尚未运行（[流程](.claude/skills/jmag-simulation/references/static-3d.md)）。
 
 ## 信任机制：反馈阶梯
 
@@ -224,6 +226,7 @@ MCP client --stdio--> server.py (Python >= 3.10)       tools, run jobs, orchestr
                         |-- worker "runner" (per solve)                    (both on JMAG's own Python 3.8, ProcessLink API)
                         |-- health.py        pre/post rules, physics invariants   (pure, unit-tested)
                         |-- estimate.py winding.py units.py                 analytic layer (pure)
+                        |-- dxf.py cad3d.py                                 DXF writer, STEP product/solid name check (pure)
                         |-- plotting.py reporting.py compare.py             post-processing (pure)
                         |-- solver_monitor.py winui.py launcher.py          progress, dialogs, screenshots, detached start
                         `-- docs_index.py                                   search the installed JMAG manual and API

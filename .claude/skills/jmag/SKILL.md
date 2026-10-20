@@ -14,6 +14,7 @@ specialised skill for the actual work.
 | The user wants to ... | Load |
 |---|---|
 | set up, run, debug or validate one study (the core loop, feedback ladder, JMAG quirks) | `jmag-simulation` |
+| a 3D static study from a STEP model (transformer / inductor L matrix, coil inflow faces, symmetry) | `jmag-simulation` -> `references/static-3d.md` |
 | draw or import geometry (DXF/STEP + labels JSON, templates, symmetry sectors) | `jmag-geometry` |
 | size a machine, pick slots/poles/winding, sanity-check a design by hand | `jmag-machine-design` |
 | run a standard test: cogging, back-EMF, Ld/Lq, load point, torque-speed, locked rotor, OC/SC, force-stroke, coupling k | `jmag-experiments` |
@@ -55,7 +56,7 @@ parametric -> postprocess.
 |---|---|
 | Session | `jmag_status` `jmag_connect` `jmag_capabilities` `jmag_dialogs` `jmag_screenshot` `jmag_cleanup` `jmag_quit` `jmag_doctor` |
 | Project | `jmag_new_project` `jmag_open_project` `jmag_save_project` `jmag_summary` `jmag_inventory` |
-| Geometry | `jmag_import_dxf` `jmag_import_cad` `jmag_list_parts` `jmag_rename_parts` `jmag_suppress_parts` `jmag_model_image` |
+| Geometry | `jmag_import_dxf` `jmag_import_cad` `jmag_list_parts` `jmag_rename_parts` `jmag_suppress_parts` `jmag_model_image` (3D: check the STEP first with `python -m jmag_bridge.cad3d`, then `jmag-simulation` -> `references/static-3d.md`) |
 | Design (pure, offline) | `jmag_estimate` `jmag_units` `jmag_winding_plan` |
 | Study setup | `jmag_create_study` `jmag_duplicate_study` `jmag_delete_study` `jmag_get_properties` `jmag_set_properties` `jmag_set_step` `jmag_set_equations` `jmag_get_equations` |
 | Materials | `jmag_find_materials` `jmag_create_material` `jmag_set_material` |

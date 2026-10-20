@@ -23,7 +23,8 @@ them lets you interpret what you see.
 
 ## Modelling
 - Static2D/StaticAX/Static (3D) accept **no circuit**; FEM coils/conductors need Transient or
-  Frequency studies. Static coil excitation = `Current` condition (Turn, Current, Direction2D).
+  Frequency studies. Static coil excitation = `Current` condition (Turn, Current, Direction2D;
+  in 3D `DirectionType` instead, see the 3D section below).
 - 2D `ModelThickness` (stack length) defaults to **1 mm**.
 - A custom B-H material made through the MaterialObject flags is a **magnet** unless the
   Material-Editor view says `MagneticPropertyType = 0`; the solver then aborts with "Check the
@@ -65,3 +66,20 @@ them lets you interpret what you see.
   it. Killing the solver *before* answering that prompt has crashed Designer.
 - Every Designer instance spawns a Geometry Editor helper (`modeller.exe`); it is left behind when
   Designer dies -> `jmag_cleanup`.
+
+## 3D Static (verified 2026-10-19; details in `references/static-3d.md`)
+- `Current` with `DirectionType = 1` (Vector) on a closed winding: the run finishes, no error, and the
+  coil carries no current (flux linkage ~2e-20 Wb). It is not a "circulate about an axis" mode.
+- `DirectionType = 0` (InflowFace) needs the outflow face on a symmetry or periodic boundary. A slit
+  winding inside the air fails at Run with "Cannot find flow-out face of FEM coil (or Current
+  condition) ...". Use a half model cut through the winding axis with `SymmetryBoundary` on the cut
+  plane (exact when the plane is flux-parallel) and pick one end face as the inflow face.
+- `SelectFaceByPosition` on a face shared by two solids selects both faces; check `NumFaces()`.
+- `GetUserMaterial` returns an invalid object for library materials; `GetValue` on a Complex
+  material property (e.g. `Permeability` set with `SetComplexValue`) logs an error, so it cannot be
+  read back. Use a linear B-H table for a custom permeability.
+- gmsh's STEP writer drops solid names; a 360 deg OCC revolve leaves free faces that export as extra
+  sheet products. `python -m jmag_bridge.cad3d model.step` flags both before import.
+- Imported STEP parts are named `<assembly>/<product>`; rename by inside point.
+- `jmag_add_current` writes `Direction2D` and is for 2D studies; the 3D `Current` goes through
+  `jmag_exec_python` (snippet S-3D-2).

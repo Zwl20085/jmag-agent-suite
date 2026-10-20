@@ -27,7 +27,7 @@ Tools marked (new) were added with the skill family; read their description befo
 
 ## Geometry
 - `jmag_import_dxf(path, model_name?)` - 2D import; every closed loop becomes a part (area, centroid returned).
-- `jmag_import_cad(path, model_name?, healing?, remove_sheet?, unit?)` - 3D STEP/IGES/Parasolid/SAT import.
+- `jmag_import_cad(path, model_name?, healing?, remove_sheet?, unit?)` - 3D STEP/IGES/Parasolid/SAT import; parts arrive as `<assembly>/<product>` (verified 23.0). Preview the names offline: `python -m jmag_bridge.cad3d model.step`. 3D Static workflow: `jmag-simulation` -> `references/static-3d.md`.
 - `jmag_list_parts(model?)` - id, name, area/volume, centroid.
 - `jmag_rename_parts(renames)` - rename by name, id or an `[x, y]` point inside the part.
 - `jmag_suppress_parts(parts, suppress?, study?)` - treat parts as absent (e.g. a DXF air-gap ring).
@@ -39,7 +39,7 @@ Tools marked (new) were added with the skill family; read their description befo
 - `jmag_winding_plan(slots, poles, phases?, layers?, coil_pitch?, turns?, parallel_paths?)` (new) - star-of-slots layout: balance check, slot map with part names, kw per harmonic, MMF harmonics, symmetry sector, `labels_coils` for FEM-coil sides.
 
 ## Study setup
-- `jmag_create_study(study_type, name, model?)` - Static2D / Transient2D / Frequency2D (+AX), Static / Transient / Frequency (3D).
+- `jmag_create_study(study_type, name, model?)` - Static2D / Transient2D / Frequency2D (+AX), Static / Transient / Frequency (3D; only 3D Static is verified).
 - `jmag_duplicate_study(study, new_name)` - copy settings without results (variants, operating points).
 - `jmag_delete_study(study)` - delete a study and its results (ask first).
 - `jmag_get_properties(study, kind?, name?, index?, names?, with_help?)` - list property names/types/values.
@@ -54,7 +54,7 @@ Tools marked (new) were added with the skill family; read their description befo
 - `jmag_set_material(study, parts, material, properties?, orientation?)` - assign material and magnet orientation.
 
 ## Excitation and conditions
-- `jmag_add_current(study, name, parts, turns, current, direction?)` - static `Current` condition (no circuit).
+- `jmag_add_current(study, name, parts, turns, current, direction?)` - static `Current` condition (no circuit); 2D only (writes `Direction2D`). A 3D `Current` needs an inflow face: snippet S-3D-2 in `jmag-scripting`.
 - `jmag_add_fem_coil(study, name, component, sides, turns?, resistance?)` - FEM coil linked to a circuit Coil.
 - `jmag_add_fem_conductor(study, name, component, conductors)` - solid conductors with eddy currents (bars, hairpins).
 - `jmag_winding(study, coils, mode?, ...)` (new) - apply a `jmag_winding_plan` layout: `mode='fem_coil'` (verified) one FEM coil per phase; `mode='jmag_winding'` JMAG's winding definition (unverified).
