@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.3.1
+
+- 3D Static verified on JMAG-Designer 23.0 (2026-10-19): two linear transformers (E55/28/21 with a 1 mm gap, P66/56
+  pot core) driven end to end through the worker, L within 0.5 % / 0.85 % of an independent 3D FE solver and the pot
+  core's L_m 10.37 mH vs 10.42 mH axisymmetric. New reference `jmag-simulation/references/static-3d.md`: the step list
+  with the exact API calls (each tagged VERIFIED / UNVERIFIED), the coil-excitation decision table (closed winding ->
+  half model + `Current` `DirectionType` InflowFace; Vector mode gives zero current on a closed loop, silently;
+  InflowFace needs the outflow face on a symmetry / periodic boundary), result keys `CoilFlux` / `CoilCurrent` /
+  `StoredEnergy`, traps and the cross-validation numbers.
+- `jmag-scripting` snippets S-3D-1 to S-3D-5 (STEP import + rename by point, 3D `Current` with inflow face,
+  `SymmetryBoundary` by face position, 3D mesh controls + energy table, coil flux / energy read), all VERIFIED; S11/S12
+  (B probe, section graph) stay UNVERIFIED.
+- `jmag_bridge.cad3d` (pure Python, no JMAG): `read_step_names(path)` / `python -m jmag_bridge.cad3d model.step` lists a
+  STEP file's products, the expected JMAG part names `<assembly>/<product>`, solids and sheets per product, and warns
+  about unnamed products (gmsh's STEP writer), sheet-only products (free faces of a 360 deg revolve), duplicates and
+  multi-solid products; `compare_names()` against the labels JSON. Not an MCP tool.
+- Docs: `docs/jmag-facts.md` 3D Static section; gotchas, transformer (new section 6), actuator (3D InflowFace rule),
+  geometry and router skills point to the 3D workflow; `jmag_add_current` documented as 2D only. README coverage table
+  split into 2D / 3D Static rows, transformer cells say what was actually verified (2D inductor, 3D transformer L
+  matrix), and a row for the unverified 3D transient / winding / field export.
+
 ## 0.3.0
 
 - 3 new MCP tools (72 -> 75): `jmag_doctor`, `jmag_guide`, `jmag_star_repo`.
