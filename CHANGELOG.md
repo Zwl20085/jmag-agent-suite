@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.3.3
+
+- Nonlinear 3D Static verified on JMAG-Designer 23.0 (2026-10-20) on the 12-slot / 10-pole axial-flux PM machine of
+  0.3.2 with M270-35A B-H steel, against an independent 3D FE solver with the same table: flux linkage 0.2-0.6 %,
+  load torque 0.6 % at 5 A and 15 A, cogging peak-to-peak 0.03 %. New section 9 "Nonlinear 3D Static" in
+  `jmag-simulation/references/static-3d.md`: user B-H steel through `create_material` (23 rows read back equal,
+  `IsMagnet` False), `NonlinearMaxIteration` / `NonlinearTolerance` defaults 15 / 1e-3 (1e-5 changed psi by 4e-8),
+  `IccgTolerance` / `IccgMaxIteration` defaults, iterations from `jcgmntr` (8-9), cost per case, the over-B-H-curve
+  extrapolation warning.
+- Sector torque: a loaded 180 deg `RotationPeriodicBoundary` `Reverse` sector reports the rotor `Torque` as the
+  full-model value (1.863 vs 1.882 N m, factor 1), with `FullModelConversion` 1 / `ConversionFactor` 1 read and left
+  at their defaults (non-default values unverified); the stator condition has the opposite sign. `static-3d.md`
+  sections 7, 8.2, 8.5, 8.8 updated.
+- 2D Static radial SPM route verified (2026-10-20): one rotated full DXF per rotor angle, `add_current` per coil side,
+  Radial magnets, `SymmetryBoundary` on the outer and bore circles, `AirRegion` 0 in the 2D mesh control, nodal
+  `Torque`; psi 0.03 %, load torque 0.3 % vs an independent solver, 5 s mesh + 2 s solve at 20 k elements. Cogging
+  moved 30 % between 20 k and 101 k elements (psi 0.3 %). New `jmag-experiments` PMSM section 2c.
+- `jmag-scripting` snippets S-3D-10 (user B-H read-back), S-3D-11 (nonlinear study properties), S-3D-12 (`jcgmntr`
+  iteration count), all VERIFIED; S-3D-6 note updated (sector torque factor 1).
+- Docs: `docs/jmag-facts.md` 2026-10-20 nonlinear / 2D section; gotchas (nonlinear defaults, B-H extrapolation
+  warning, sector torque, 2D cogging mesh sensitivity, symmetry-enclosed region warning, duplicate label names);
+  `jmag-geometry` unique label names per angle; result keys (`Torque` in 2D Static, sector factor 1, `CoilFlux` in
+  2D Static); study property defaults; README coverage (3D Static nonlinear PM machine, 2D radial SPM). No code
+  changes.
+
 ## 0.3.2
 
 - 3D Static verified for a rotating PM machine on JMAG-Designer 23.0 (2026-10-20): a 12-slot / 10-pole axial-flux PM
