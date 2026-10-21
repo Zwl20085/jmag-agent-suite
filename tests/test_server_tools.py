@@ -133,3 +133,46 @@ def test_run_cases_status_running_and_finished(fake, tmp_path, monkeypatch):
     assert st["state"] == "finished" and st["run"]["result"]["finished"] == [0, 1, 2] and "case=k" in st["hint"]
     job["response"] = {"ok": False, "error": {"message": "no case produced results"}}
     assert asyncio.run(server._run_cases_status(job))["state"] == "failed"
+
+
+def _finished_job(response):
+    import time
+    return {"id": "r1", "study": "Coarse", "model": None, "started": time.time() - 5, "finished": time.time(),
+            "done": True, "folder": "calc", "freq": None, "response": response}
+
+
+def test_run_status_top_level_ok_and_solver_aborted(fake, monkeypatch):
+    # jmag_run / jmag_run_status used to carry no top-level "ok", so a client reading out.get("ok", True) took an
+    # aborted solve for a success. Messages below are recorded from JMAG-Designer 23.0 runs.
+    log = [{"status": "Error", "text": "The solver module was aborted.", "step": None}]
+    monkeypatch.setattr(server.solver_monitor, "log_messages", lambda folder: log)
+    monkeypatch.setattr(server.solver_monitor, "convergence", lambda *a, **k: None)
+    failed = {"ok": False, "error": {"type": "OpError", "message": "the solver finished without results (failed or cancelled)",
+                                     "data": {"errors": ["The solver module jam was aborted.\nPlease confirm the model."]}}}
+    fake.job = _finished_job(failed)
+    st = asyncio.run(server.jmag_run_status())
+    assert st["ok"] is False and st["state"] == "failed" and st["solver_aborted"] is True
+    assert st["error"]["message"].startswith("the solver aborted: The solver module jam was aborted.")
+    assert "jmag_run again" in st["error"]["hint"] and st["solver_log_warnings"] == log
+
+    # results present, but the solver log says it aborted: not usable, though state keeps its old meaning
+    fake.job = _finished_job({"ok": True, "result": {"has_result": True, "errors": []}})
+    st = asyncio.run(server.jmag_run_status())
+    assert st["ok"] is False and st["state"] == "finished" and st["solver_aborted"] is True
+
+    monkeypatch.setattr(server.solver_monitor, "log_messages", lambda folder: [])
+    fake.job = _finished_job({"ok": True, "result": {"has_result": True, "errors": []}})
+    st = asyncio.run(server.jmag_run_status())
+    assert st["ok"] is True and st["solver_aborted"] is False and "error" not in st
+
+    fake.job = _finished_job({"ok": False, "error": {"message": "cancelled by user"}})
+    st = asyncio.run(server.jmag_run_status())
+    assert st["ok"] is False and st["solver_aborted"] is False and st["error"]["message"] == "cancelled by user"
+
+
+def test_run_status_running_is_ok(fake, monkeypatch):
+    import time
+    monkeypatch.setattr(server.winui, "dialogs", lambda: [])
+    fake.job = {"id": "r1", "study": "Coarse", "model": None, "started": time.time(), "done": False, "folder": None}
+    st = asyncio.run(server.jmag_run_status())
+    assert st["ok"] is True and st["state"] == "running"

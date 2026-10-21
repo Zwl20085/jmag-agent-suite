@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -26,7 +27,7 @@ from mcp.types import ToolAnnotations
 from . import compare, estimate, health, materials, plotting, reporting, solver_monitor, star, units, winding, winui
 from .config import find_jmag, load_state, save_state, state_dir
 from .docs_index import DocsIndex
-from .worker_client import Worker, WorkerError
+from .worker_client import Worker, WorkerError, abandon_all
 
 INSTRUCTIONS = """\
 Bridge to JMAG-Designer (electromagnetic FEA). Typical loop:
@@ -660,7 +661,12 @@ async def jmag_run(study: str, wait_seconds: float = 120, overwrite: bool = True
 @mcp.tool()
 async def jmag_run_status() -> dict:
     """Progress of the current/last solve: steps done / total, elapsed, ETA, nonlinear convergence, dialogs.
-    When finished: the solver report plus the post-run health check."""
+    When finished: the solver report plus the post-run health check.
+
+    ok is true while the solve runs and when it finished with results; false when it failed, and also when JMAG's
+    messages say the solver aborted (solver_aborted=true, e.g. "The solver module jam was aborted", "jam.exe failed to
+    execute", "Size of point array is zero") even if the study still reports results: treat them as unusable.
+    """
     job = B.job
     if not job:
         return {"ok": False, "error": {"message": "no run started in this session"}}
@@ -672,6 +678,7 @@ async def jmag_run_status() -> dict:
         r = await run_op("calc_folder", 60, study=job["study"], model=job["model"])
         job["folder"] = (r.get("result") or {}).get("folder")
     if not job["done"]:
+        st["ok"] = True
         st["state"] = "running"
         if job.get("folder"):
             pr = solver_monitor.progress(job["folder"])
@@ -697,8 +704,18 @@ async def jmag_run_status() -> dict:
     if "post" not in job:
         job["post"] = await _post(job["study"], job["model"], job.get("freq"), resp)
     st["post"] = job["post"]
-    if job.get("folder"):
-        st["solver_log_warnings"] = solver_monitor.log_messages(job["folder"])[:20]
+    log = solver_monitor.log_messages(job["folder"]) if job.get("folder") else []
+    if log:
+        st["solver_log_warnings"] = log[:20]
+    aborted = health.solver_abort_messages(resp, log)
+    st["solver_aborted"] = bool(aborted)
+    st["ok"] = bool(resp.get("ok")) and not aborted
+    if not st["ok"]:
+        run_err = resp.get("error") or {}
+        hint = ("no usable results: read run.error, post.health and solver_log_warnings, fix the model (often a "
+                "material curve, the mesh or a condition), then jmag_run again")
+        st["error"] = ({"message": f"the solver aborted: {aborted[0]}", "hint": hint} if aborted else
+                       {"message": run_err.get("message") or "the run failed", "hint": run_err.get("hint") or hint})
     return st
 
 
@@ -1429,8 +1446,10 @@ async def _run_cases_status(job: dict) -> dict:
         if blocking:
             st["dialogs"] = blocking
             st["hint"] = "JMAG shows a dialog - it may be waiting for input (see jmag_dialogs / jmag_screenshot)"
+        st["ok"] = True
         return st
     resp = job["response"]
+    st["ok"] = bool(resp.get("ok"))
     st["state"] = "finished" if resp.get("ok") else "failed"
     st["run"] = resp
     st["hint"] = ("read case k with jmag_list_results(study, case=k) / jmag_get_result(study, table, case=k); "
@@ -1811,6 +1830,36 @@ except Exception:  # noqa: BLE001
     pass
 
 
+#: After the MCP client closes stdio the process must be gone within this many seconds (the MCP Python client kills
+#: the whole process tree after 2 s; other clients may wait for ever).
+SHUTDOWN_GRACE_S = 5.0
+
+
+def _release_on_disconnect(exit_code: int = 0, grace: float = SHUTDOWN_GRACE_S) -> None:
+    """The stdio session ended (client closed stdin, or the serve loop failed): make the process exit promptly.
+
+    The serve loop itself returns at once, but asyncio then joins the default executor, and a thread still inside a
+    tool call (Worker.call waits up to the op timeout: 600 s by default, 30 days for jmag_run) kept the process
+    alive long after the client had gone. Release every JMAG worker (blocked calls raise, workers exit after their
+    current op; nothing is killed), and arm a daemon timer that hard-exits if anything else still blocks.
+    """
+    abandon_all()
+    t = threading.Timer(grace, os._exit, args=(exit_code,))
+    t.daemon = True
+    t.start()
+
+
+async def _serve_stdio() -> None:
+    code = 0
+    try:
+        await mcp.run_stdio_async()
+    except BaseException:
+        code = 1
+        raise
+    finally:
+        _release_on_disconnect(code)
+
+
 def main(argv: list[str] | None = None) -> None:
     """Console entry (`jmag-mcp`, `python -m jmag_bridge`): MCP server on stdio, or --doctor / --version."""
     import argparse
@@ -1828,8 +1877,9 @@ def main(argv: list[str] | None = None) -> None:
         p.error("--json only works together with --doctor")
     if unknown:
         print(f"jmag-agent-suite: ignoring unknown arguments {unknown}", file=sys.stderr)
+    import anyio
     try:
-        mcp.run()
+        anyio.run(_serve_stdio)  # what mcp.run() does for stdio, plus _release_on_disconnect
     except Exception as e:  # Claude Code hides the traceback: leave a log and a pointer to --doctor
         doctor.record_startup_failure(e)
         raise

@@ -75,7 +75,9 @@ Tools marked (new) were added with the skill family; read their description befo
 ## Run
 - `jmag_check(study, stage?, electrical_frequency_hz?)` - pre-run lint or post-run health; PASS/CHECK/FAIL.
 - `jmag_run(study, wait_seconds?, overwrite?, check_first?, force?, electrical_frequency_hz?)` - solve in a runner process.
-- `jmag_run_status` - progress, ETA, convergence, dialogs; solver report and post-check when finished.
+- `jmag_run_status` - progress, ETA, convergence, dialogs; solver report and post-check when finished. Top-level
+  `ok` is false when the run failed or `solver_aborted` is true (JMAG's messages say the solver aborted): no usable
+  results even if `state` is `finished`.
 - `jmag_cancel_run` - safe cancel (Abort -> answer the prompt -> only then terminate the solver).
 - `jmag_solver_report(study)` - solver errors/warnings, element count, calc folder.
 
