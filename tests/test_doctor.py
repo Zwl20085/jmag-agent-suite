@@ -228,13 +228,29 @@ def test_server_main_logs_startup_failure(monkeypatch, tmp_path, capsys):
     from jmag_bridge import server
     monkeypatch.setattr(config, "state_dir", lambda: tmp_path)
 
-    def broken():
+    async def broken():
         raise RuntimeError("stdio broke")
-    monkeypatch.setattr(server.mcp, "run", broken)
+    released = []
+    monkeypatch.setattr(server.mcp, "run_stdio_async", broken)
+    # the real one arms a hard-exit timer, which would end the test process
+    monkeypatch.setattr(server, "_release_on_disconnect", lambda code=0: released.append(code))
     with pytest.raises(RuntimeError):
         server.main([])
     assert "stdio broke" in (tmp_path / "server-startup.log").read_text()
     assert "failed to start" in capsys.readouterr().err
+    assert released == [1]
+
+
+def test_server_main_releases_workers_when_the_client_leaves(monkeypatch):
+    from jmag_bridge import server
+    released = []
+
+    async def served():  # stdin reached EOF: the serve loop returns normally
+        return None
+    monkeypatch.setattr(server.mcp, "run_stdio_async", served)
+    monkeypatch.setattr(server, "_release_on_disconnect", lambda code=0: released.append(code))
+    server.main([])
+    assert released == [0]
 
 
 def test_jmag_doctor_tool(monkeypatch):

@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.3.6
+
+- Fix: the server process now ends within about a second of its MCP client closing stdio, also with a tool call in
+  flight. Before, a thread still inside `Worker.call` (any JMAG op, up to its timeout of 600 s by default; a
+  `jmag_run` / `jmag_run_cases` solve waits up to 30 days) kept `python -m jmag_bridge` alive after the session ended,
+  because asyncio joins its default executor on the way out; the MCP Python client then killed the whole process
+  tree after its 2 s grace, JMAG worker included, and clients without such a kill waited for ever. On stdin EOF the
+  server now releases every JMAG worker (blocked calls return at once, each worker's stdin is closed so it exits
+  after its current op; nothing is killed, JMAG-Designer is never touched) and a daemon timer hard-exits the process
+  if anything still blocks after `SHUTDOWN_GRACE_S` (5 s). New `Worker.abandon()` / `worker_client.abandon_all()`.
+  Tests: `tests/test_stdio_shutdown.py` (real server over pipes with a stand-in JMAG Python; both cases failed before).
+- Note for client scripts: leaving an MCP stdio session with an exception in flight can also hang on the *client*
+  side when the session and transport context managers are exited by hand (`await session.__aexit__(...)` raises the
+  in-flight exception as an `ExceptionGroup`, so a following `await stdio_client_cm.__aexit__(...)` never runs, the
+  server's stdin is never closed and asyncio's shutdown waits on the transport's stdout drain). Use nested
+  `async with` or a `contextlib.AsyncExitStack`.
+- `jmag_run` / `jmag_run_status` (and `jmag_run_cases`) now carry the envelope's top-level `ok`: true while running
+  and on a successful finish, false when the run failed. Before, the key was missing, so a client reading
+  `out.get("ok", True)` took a failed solve for a success. New field `solver_aborted` (finished `jmag_run`): true when
+  the run errors, the JMAG messages logged during the run or the Error entries of the solver's Designer.log say the
+  solver aborted ("The solver module jam was aborted", "jam.exe failed to execute", "fail to execute the solver",
+  "Size of point array is zero"); then `ok` is false with an `error` (message + hint) even if the study reports
+  results. `state` keeps its meaning (`finished` iff the run op returned ok). Patterns: `health.SOLVER_ABORT_PATTERNS`,
+  `health.solver_abort_messages()`, unit-tested on messages recorded from JMAG-Designer 23.0. Live check pending for
+  the "results present but aborted" case (not observed yet; both recorded aborts had no results).
+
 ## 0.3.5
 
 - 3D Static at arbitrary (off-grid) rotor angles verified (JMAG-Designer 23.0, 2026-10-20) on the 12-slot / 10-pole

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "jmag-agent-suite"
-version = "0.3.5"
+version = "0.3.6"
 description = "All-in-one JMAG-Designer agent toolkit: MCP server, physics checks and Claude skills for electromagnetic FEA"
 readme = "README.md"
 license = { text = "MIT" }

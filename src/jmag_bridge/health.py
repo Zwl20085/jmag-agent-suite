@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import cmath
 import math
+import re
 from typing import Iterable, Sequence
 
 COIL_CONDITIONS = ("Current", "FEMCoil")
@@ -311,6 +312,38 @@ def classify_message(text: str, default_level: str) -> tuple[str, str, str]:
         if pat in low:
             return level, code, why
     return default_level, "SOLVER_" + default_level.upper(), ""
+
+
+# Messages meaning the solver did not finish (lowercase regexes). Seen on JMAG-Designer 23.0 in failed runs:
+# "The solver module jam was aborted." / "The solver module mg2dnv was aborted." (run errors), "jam.exe failed to
+# execute.", Designer.log "The solver module was aborted." / "fail to execute the solver.", and jam 20286
+# "Size of point array is zero" (a magnet without a solver curve).
+SOLVER_ABORT_PATTERNS = (
+    r"solver module(?: \S+)? was aborted",
+    r"\bfail(?:ed)? to execute\b",
+    r"size of point array is zero",
+)
+
+
+def solver_abort_messages(run_env: dict, log_entries: Iterable[dict] | None = None) -> list[str]:
+    """The messages of a finished run that say the solver aborted (empty list = no sign of an abort).
+
+    Looks at the errors the run op collected (``result.errors`` or ``error.data.errors``), the JMAG messages logged
+    during the run (``jmag_messages``) and the Error entries of the solver's Designer.log (``log_entries`` from
+    ``solver_monitor.log_messages``). Warnings are ignored.
+    """
+    texts: list[str] = []
+    for part in (run_env.get("result"), (run_env.get("error") or {}).get("data")):
+        if isinstance(part, dict):
+            texts += [str(t) for t in part.get("errors") or []]
+    texts += [str(t) for t in run_env.get("jmag_messages") or []]
+    texts += [str(e.get("text", "")) for e in log_entries or [] if e.get("status") == "Error"]
+    out: list[str] = []
+    for t in texts:
+        flat = " ".join(t.split())
+        if flat not in out and any(re.search(p, flat.lower()) for p in SOLVER_ABORT_PATTERNS):
+            out.append(flat)
+    return out
 
 
 def postflight(run_info: dict, convergence: dict | None = None, tables: dict | None = None,

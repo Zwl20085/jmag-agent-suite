@@ -228,3 +228,40 @@ def test_readme_numbers_match_thresholds():
         import pytest
         pytest.xfail(f"README physics row says {nums} % but health.THRESHOLDS give {expected} % "
                      f"(energy, power balance): update README.md (cell: {cell!r})")
+
+
+# Recorded on JMAG-Designer 23.0 (2026-10-21): run errors of two aborted solves and the Designer.log Error entries.
+ABORTED_JAM = {"ok": False, "error": {"type": "OpError", "message": "the solver finished without results (failed or cancelled)",
+                                      "data": {"has_result": False, "errors": [
+    "Point array of material is undefined.",
+    "The solver module jam was aborted.\nPlease confirm the model and settings.\nCommand line:\nD:/Program Files/JMAG-Designer23.0\jam.exe",
+    "Check the point array setting in material \"MAG_X\" for part \"Magnet_N_2\"."],
+    "warnings": ["In case of parallel calculation, automatic setting of ICCG acceleration factor is not supported."]}}}
+ABORTED_LOG = [{"status": "Warning", "text": "reset the force condition region", "step": None},
+               {"status": "Error", "text": "fail to execute the solver.", "step": None},
+               {"status": "Error", "text": "The solver module was aborted.", "step": None}]
+
+
+def test_solver_abort_messages_from_recorded_runs():
+    from jmag_bridge.health import solver_abort_messages
+    got = solver_abort_messages(ABORTED_JAM)
+    assert got == ["The solver module jam was aborted. Please confirm the model and settings. Command line: "
+                   "D:/Program Files/JMAG-Designer23.0\jam.exe"]
+    mg2d = {"ok": False, "error": {"data": {"errors": ["jam.exe failed to execute.",
+                                                       "The solver module mg2dnv was aborted.\nPlease confirm"]}}}
+    assert len(solver_abort_messages(mg2d)) == 2
+    assert solver_abort_messages({"ok": True, "result": {"errors": []}}, ABORTED_LOG) == [
+        "fail to execute the solver.", "The solver module was aborted."]
+    # results present but the messages logged during the run say the solver gave up
+    partial = {"ok": True, "result": {"has_result": True, "errors": []},
+               "jmag_messages": ["Error 20286: Size of point array is zero."]}
+    assert solver_abort_messages(partial) == ["Error 20286: Size of point array is zero."]
+
+
+def test_solver_abort_messages_ignore_warnings_and_clean_runs():
+    from jmag_bridge.health import solver_abort_messages
+    warn_only = [{"status": "Warning", "text": "The solver module was aborted.", "step": None}]
+    clean = {"ok": True, "result": {"has_result": True, "errors": [],
+                                    "warnings": ["The step control has been automatically updated"]}}
+    assert solver_abort_messages(clean, warn_only) == []
+    assert solver_abort_messages({}) == []

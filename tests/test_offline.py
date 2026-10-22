@@ -161,3 +161,29 @@ def test_worker_is_python38_syntax():
     src = Path(__file__).resolve().parents[1] / "src" / "jmag_bridge" / "worker"
     r = subprocess.run([exe, "--target=3.8-", "--violations", "--no-tips", str(src)], capture_output=True, text=True)
     assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_worker_abandon_releases_a_blocked_call(worker):
+    # Server shutdown: a call stuck in the worker must return at once, and the worker is left to exit by itself.
+    import threading
+    import time
+    from jmag_bridge.worker_client import WorkerError
+    out = {}
+
+    def blocked():
+        t0 = time.time()
+        try:
+            worker.call("exec_python", 600, code="import time\ntime.sleep(5)\nresult = 1")
+        except WorkerError as e:
+            out["error"], out["s"] = str(e), time.time() - t0
+
+    th = threading.Thread(target=blocked)
+    th.start()
+    time.sleep(1.0)
+    worker.abandon()
+    th.join(10)
+    assert "shutting down" in out["error"] and out["s"] < 3, out
+    with pytest.raises(WorkerError, match="shutting down"):
+        worker.call("ping", 5)
+    worker.proc.wait(30)  # stdin closed: the worker ends after its current op, nobody killed it
+    assert worker.proc.returncode == 0
