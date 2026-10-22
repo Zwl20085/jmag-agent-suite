@@ -15,6 +15,7 @@
 ![Platform](https://img.shields.io/badge/platform-Windows-0078D6)
 ![Tools](https://img.shields.io/badge/MCP%20tools-75-6f42c1)
 ![Skills](https://img.shields.io/badge/Claude%20skills-10-ff7b00)
+![Version](https://img.shields.io/badge/version-0.3.0-informational)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 </div>
@@ -33,18 +34,18 @@
 
 > *运行因单元体积为负而中止，转矩是 -0.3 Nm。问题出在哪里？*
 
+> *按这个 AlNiCo 牌号数据手册上 300 °C 和 500 °C 的 B-H 曲线，把它定义为非线性磁钢，以平行充磁赋给转子磁钢条，
+> 在峰值工况打开退磁输出，并告诉我 JMAG 接受了什么。*
+
 随后智能体会使用下面的 MCP 工具和技能族。每个工具都返回
 `{"ok", "result", "error": {"message", "hint"}, "jmag_messages"}`，每个设置的值都会回读，智能体也被要求在声称成功之前，用检查来支撑每一个数字。
 
-<table><tr>
-<td><img src="docs/images/spm_flux_density.png" width="300" alt="Flux density of a 12-slot 4-pole SPM motor"></td>
-<td><img src="docs/images/ccore_flux_density.png" width="300" alt="C-core flux density"></td>
-<td><img src="docs/images/circuit_current_source.png" width="300" alt="Circuit built by jmag_circuit_quick"></td>
-</tr><tr>
-<td align="center"><sub>12s/4p SPM，1500 rpm，由智能体建模并求解。转矩 1.774 Nm，由磁链算得 1.777 Nm。</sub></td>
-<td align="center"><sub>自检用 C 形铁心在峰值电流下（铁心柱约 0.73 T，与 L·I/(N·A) 的预测一致）。</sub></td>
-<td align="center"><sub>由 <code>jmag_circuit_quick</code> 生成的电路，接线已通过 KVL 检查证明。</sub></td>
-</tr></table>
+每项能力一张图：
+
+| 电机：建模与求解 | 静态场与电感 | 电路 | 磁钢：非线性 B-H |
+|---|---|---|---|
+| <img src="docs/images/spm_flux_density.png" width="220" alt="Flux density of a 12-slot 4-pole SPM motor"> | <img src="docs/images/ccore_flux_density.png" width="220" alt="C-core flux density"> | <img src="docs/images/circuit_current_source.png" width="220" alt="Circuit built by jmag_circuit_quick"> | <img src="docs/images/alnico_twin.png" width="220" alt="Cast AlNiCo magnet B-H table and the IPM twin built by the agent"> |
+| <sub>12s/4p SPM，1500 rpm，由智能体建模并求解。转矩 1.774 Nm，由磁链算得 1.777 Nm。</sub> | <sub>自检用 C 形铁心在峰值电流下（铁心柱约 0.73 T，与 L·I/(N·A) 的预测一致）。</sub> | <sub>由 <code>jmag_circuit_quick</code> 生成的电路，接线已通过 KVL 检查证明。</sub> | <sub>铸造 AlNiCo 作为表格化 B-H 磁钢（设置 126 行并回读），用于 24 槽 20 极 IPM 孪生模型；见[磁钢](#磁钢线性非线性-b-h退磁)。</sub> |
 
 ## 为什么做这个项目
 
@@ -130,8 +131,37 @@ claude mcp add jmag --scope user -- "$PWD\.venv\Scripts\python.exe" -m jmag_brid
 | 绘图、对比、报告 | Verified | Verified | Verified | Verified | Verified |
 | 热分析 | Script | Script | Script | Script | Script |
 | 力 / NVH 导出 | Script | Script | Script | n/a | Script |
+| 磁钢：线性 Br / μr | Verified | Verified | n/a | n/a | Recipe |
+| 磁钢：分温度的非线性 B-H 表 | Script | Script | n/a | n/a | Script |
+| 不可逆退磁分析 | Script | Script | n/a | n/a | Script |
 
 “已验证”一列对应 [12 槽 / 4 极 SPM 示例](examples/spm_motor)和自检用 C 形铁心；这张表同时也是路线图。其他器件类型上标为“Verified”的条目，表示该步骤与器件类型无关。三维静态一行对应 2026-10-19 在 23.0 上运行的两个线性变压器（E 形铁心、罐形铁心），电感与独立有限元结果相差在 0.9 % 以内；变压器开路 / 短路试验仍是流程（Recipe），三维静态以外的三维分析尚未运行（[流程](.claude/skills/jmag-simulation/references/static-3d.md)）。
+
+## 磁钢：线性、非线性 B-H、退磁
+
+永磁体是通过 `jmag_exec_python`（材料编辑器 API）创建的自定义材料，再用 `jmag_set_material` 加充磁方向赋给部件。智能体在使用材料之前会回读每一个值。
+
+| 模型 | 材料编辑器调用（`um = lib.GetUserMaterial(name)`） | 适用场合 |
+|---|---|---|
+| 线性（Br、回复磁导率 μr） | `SetValue("MagneticPropertyType", 1)`、`SetValue("MagnetPermeabilityType", 6)`、`ResidualMagneticFluxDensity`、`MagnetPermeability` | 拐点以上的烧结 SmCo / NdFeB |
+| **非线性、可逆 B-H 表** | `SetValue("MagnetPermeabilityType", 1)`、`SetTable("BhTable", [[H_A_per_m, B_T], ...])`、`RecoilPermeability`；用 `GetTable("BhTable")`、`GetRows()`、`GetValue(i, j)` 回读 | 铸造 AlNiCo，以及任何工作点由其曲线决定的磁钢 |
+| 每个温度一条曲线 | 每个工况温度一种材料（`MAG_<grade>_<T>C`），使用该温度下的表 | 在 `TemperatureBhTable` TableList 的格式有文档之前 |
+| 退磁分析 | 材料条件 `ReversibleDemag`（0 = 不可逆），通过 `jmag_set_properties(kind="material", name=<part>)` 设置；研究输出 `DemagnetizationRatio`、`DemagnetizationRatioDiffUnDemag` | 峰值或故障工况 |
+
+属性名和枚举值来自本机安装的 JMAG 23 脚本参考（`jmag_docs_search`、`jmag_docs_page`：`MagnetPermeabilityType`
+0 Linear、1 NonLinearReversible、2 NonLinearReversibleWithTemperature、3 NonLinearNonReversible、6 MagnetLinearBr、
+8 NonReversible point array）；`jmag_get_properties(kind="material", with_help=True)` 会列出当前安装实际提供的属性。
+
+**完整示例：AlNiCo 孪生模型。** 一台 24 槽 / 20 极 IPM，20 根铸造 AlNiCo 磁钢条（GUK A9B，Br 1.08 T，HcB 120 kA/m），全程通过公开工具无人值守完成：
+
+1. 数据手册 300 °C 和 500 °C 的曲线（每条 126 行：正常退磁曲线加回复线）以 `BhTable` 写入，`MagnetPermeabilityType` 为 1，并逐行回读一致；
+2. 每根磁钢条赋予该材料，模式为 `Parallel`，并设置 `DirectionAngle`（N 极朝外，S 极朝内）；
+3. Rated_300C、Peak_500C、NoLoad_1000rpm 在仅建模（不求解）的一轮中完成建模、剖分和前置检查（3 × `PASS`）；
+4. Peak_500C 设置了 `ReversibleDemag` 0 和退磁率输出，供夜间求解使用。
+
+安装返回的材料和研究属性列表（`ReversibleDemag`、`MagnetTemperatureType`、`UseMagnetizedMagnet`、`DemagnetizationRatio` 等）与模型一起保存，因此设置中没有任何猜测。
+
+尚无文档的部分（智能体会如实报告，而不是近似处理）：`MagnetPermeabilityType` 8 所用的不可逆点列表（`DemagBhTable`、`DemagIrreversibleBhTable`）的列格式，以及退磁率结果的标量读取方式（它是云图结果，请在 GUI 中或用 `jmag_contour_image` 查看）。
 
 ## 信任机制：反馈阶梯
 
@@ -164,6 +194,8 @@ claude mcp add jmag --scope user -- "$PWD\.venv\Scripts\python.exe" -m jmag_brid
 | | 工况点功率平衡 | 0.9 % |
 | 12s/4p SPM，`jmag_loss_study` | 基于瞬态的铁耗研究 | 定子磁滞损耗 1.998 W + 涡流损耗 2.047 W = 总计 4.045 W |
 | 12s/4p SPM，`jmag_run_cases` | 设计表，2 个算例（10 A、5 A） | 1.804 / 0.910 Nm，比值 0.504，每个算例的结果通过 `case=` 获取 |
+| 24s/20p IPM，线性 Sm2Co17 磁钢条 | 与 HairpinFE 孪生模型对比：磁链 / 反电动势 / 峰值转矩 | 0.25 % / 0.2 % / 0.45 % 以内 |
+| 24s/20p IPM，铸造 AlNiCo B-H 表（仅建模） | `BhTable` 设置值与回读值；3 个研究的前置检查 | 126 / 126 行一致；3 × PASS |
 
 ## 按任务分类的工具
 
@@ -270,6 +302,7 @@ MCP client --stdio--> server.py (Python >= 3.10)       tools, run jobs, orchestr
 - docstring 中标为未验证的工具（效率图、优化表、JMAG 绕组定义）是按 API 参考实现的，会回读它们设置的每个值，但尚未在能够运行它们的许可证上运行过。欢迎提供来自其他安装环境的反馈。
 - 完整许可证下存在热分析研究类型（`jmag_capabilities` 会列出），但桥接层目前还没有热分析流程；NVH 力导出是 JMAG 提供的脚本。损耗技能记录了这两者的导出途径。
 - 在在线测试中，有两个 API 调用使 Designer 23.0 崩溃（JMAG 绕组定义、场值导出）。除非 `force=true`，否则桥接层会拒绝执行它们。
+- 磁钢：线性磁钢和表格化的可逆 B-H 磁钢可以建模并回读。JMAG 的不可逆（点列）磁钢模型需要一种脚本参考中没有给出的表格格式，而退磁率是云图结果，桥接层中没有对应的标量读取工具。
 - JMAG 是商业软件。本项目不包含其任何代码或文档。与 JSOL
   Corporation 无隶属关系。JMAG 是 JSOL Corporation 的商标。
 

@@ -15,6 +15,7 @@ English | [简体中文](README.zh-CN.md)
 ![Platform](https://img.shields.io/badge/platform-Windows-0078D6)
 ![Tools](https://img.shields.io/badge/MCP%20tools-75-6f42c1)
 ![Skills](https://img.shields.io/badge/Claude%20skills-10-ff7b00)
+![Version](https://img.shields.io/badge/version-0.3.0-informational)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 </div>
@@ -33,19 +34,20 @@ English | [简体中文](README.zh-CN.md)
 
 > *The run aborted with a negative element volume and the torque is -0.3 Nm. What is wrong?*
 
+> *Define this AlNiCo grade as a nonlinear magnet from its datasheet B-H curve at 300 °C and 500 °C, assign it to the
+> rotor bars with parallel magnetisation, switch on the demagnetisation output at the peak case, and show me what
+> JMAG accepted.*
+
 The agent then uses the MCP tools and the skill family below. Every tool answers with
 `{"ok", "result", "error": {"message", "hint"}, "jmag_messages"}`, every value set is read back, and the agent is
 taught to back each number with a check before claiming success.
 
-<table><tr>
-<td><img src="docs/images/spm_flux_density.png" width="300" alt="Flux density of a 12-slot 4-pole SPM motor"></td>
-<td><img src="docs/images/ccore_flux_density.png" width="300" alt="C-core flux density"></td>
-<td><img src="docs/images/circuit_current_source.png" width="300" alt="Circuit built by jmag_circuit_quick"></td>
-</tr><tr>
-<td align="center"><sub>12s/4p SPM at 1500 rpm, built and solved by the agent. Torque 1.774 Nm vs 1.777 Nm from flux linkage.</sub></td>
-<td align="center"><sub>Self-test C-core at peak current (leg about 0.73 T, as L·I/(N·A) predicts).</sub></td>
-<td align="center"><sub>Circuit from <code>jmag_circuit_quick</code>, wiring proven by the KVL check.</sub></td>
-</tr></table>
+One figure per capability:
+
+| Machines: build and solve | Static fields and inductors | Circuits | Magnets: nonlinear B-H |
+|---|---|---|---|
+| <img src="docs/images/spm_flux_density.png" width="220" alt="Flux density of a 12-slot 4-pole SPM motor"> | <img src="docs/images/ccore_flux_density.png" width="220" alt="C-core flux density"> | <img src="docs/images/circuit_current_source.png" width="220" alt="Circuit built by jmag_circuit_quick"> | <img src="docs/images/alnico_twin.png" width="220" alt="Cast AlNiCo magnet B-H table and the IPM twin built by the agent"> |
+| <sub>12s/4p SPM at 1500 rpm, built and solved by the agent. Torque 1.774 Nm vs 1.777 Nm from flux linkage.</sub> | <sub>Self-test C-core at peak current (leg about 0.73 T, as L·I/(N·A) predicts).</sub> | <sub>Circuit from <code>jmag_circuit_quick</code>, wiring proven by the KVL check.</sub> | <sub>Cast AlNiCo as a tabulated B-H magnet (126 rows set, read back) in a 24s/20p IPM twin; see [Magnets](#magnets-linear-nonlinear-b-h-demagnetisation).</sub> |
 
 ## Why this exists
 
@@ -142,6 +144,9 @@ API but not yet exercised on a real licence. **Recipe** = the skill walks the ag
 | Plots, comparison, report | Verified | Verified | Verified | Verified | Verified |
 | Thermal | Script | Script | Script | Script | Script |
 | Force / NVH export | Script | Script | Script | n/a | Script |
+| Magnets: linear Br / μr | Verified | Verified | n/a | n/a | Recipe |
+| Magnets: nonlinear B-H table per temperature | Script | Script | n/a | n/a | Script |
+| Irreversible demagnetisation analysis | Script | Script | n/a | n/a | Script |
 
 The verified column is the [12-slot / 4-pole SPM example](examples/spm_motor) and the self-test C-core; the table doubles
 as the roadmap. "Verified" entries on other device families mean the step does not depend on the device. The 3D Static row's
@@ -164,6 +169,39 @@ model (radial arc magnets, one inflow-face `Current` per coil side) gave psi 0.1
 of the axial-flux machine (0.7 / 1.3 / 2.9 deg, one STEP per angle) agreed with an independent solver's mortar
 sliding interface to psi 0.6 %, load torque 0.3-0.7 %, cogging 0.019 N m (5 % of peak-to-peak); JMAG's own
 per-angle remeshing noise there was 0.007 N m (section 8.9).
+
+## Magnets: linear, nonlinear B-H, demagnetisation
+
+Permanent magnets are custom materials created through `jmag_exec_python` (the material editor API), then assigned with
+`jmag_set_material` and an orientation. The agent reads every value back before it uses the material.
+
+| Model | Material-editor calls (`um = lib.GetUserMaterial(name)`) | When |
+|---|---|---|
+| Linear (Br, recoil μr) | `SetValue("MagneticPropertyType", 1)`, `SetValue("MagnetPermeabilityType", 6)`, `ResidualMagneticFluxDensity`, `MagnetPermeability` | sintered SmCo / NdFeB above the knee |
+| **Nonlinear, reversible B-H table** | `SetValue("MagnetPermeabilityType", 1)`, `SetTable("BhTable", [[H_A_per_m, B_T], ...])`, `RecoilPermeability`; read back with `GetTable("BhTable")`, `GetRows()`, `GetValue(i, j)` | cast AlNiCo, any magnet whose operating point comes from its curve |
+| One curve per temperature | one material per case temperature (`MAG_<grade>_<T>C`), the table of that temperature | until the `TemperatureBhTable` TableList layout is documented |
+| Demagnetisation analysis | material condition `ReversibleDemag` (0 = irreversible) via `jmag_set_properties(kind="material", name=<part>)`; study outputs `DemagnetizationRatio`, `DemagnetizationRatioDiffUnDemag` | the peak or fault case |
+
+Property names and enum values come from the installed JMAG 23 script reference (`jmag_docs_search`,
+`jmag_docs_page`: `MagnetPermeabilityType` 0 Linear, 1 NonLinearReversible, 2 NonLinearReversibleWithTemperature,
+3 NonLinearNonReversible, 6 MagnetLinearBr, 8 NonReversible point array); `jmag_get_properties(kind="material",
+with_help=True)` lists what the live install offers.
+
+**Worked example: the AlNiCo twin.** A 24-slot / 20-pole IPM with 20 cast AlNiCo bars (GUK A9B, Br 1.08 T,
+HcB 120 kA/m), driven unattended through the public tools:
+
+1. the datasheet curve at 300 °C and 500 °C (126 rows each: the normal curve and the recoil line) goes in as `BhTable`
+   with `MagnetPermeabilityType` 1, and comes back row for row;
+2. each bar gets the material with pattern `Parallel` and its `DirectionAngle` (N outward, S inward);
+3. Rated_300C, Peak_500C and NoLoad_1000rpm are built, meshed and pre-checked (`PASS` x 3) in a build-only pass;
+4. Peak_500C carries `ReversibleDemag` 0 and the demagnetisation-ratio outputs for the overnight solve.
+
+The material and study property lists the install returned (`ReversibleDemag`, `MagnetTemperatureType`,
+`UseMagnetizedMagnet`, `DemagnetizationRatio`, ...) are recorded with the model, so nothing about the setup is guessed.
+
+Not documented yet (the agent reports these rather than approximating): the column layout of the irreversible
+point-array tables (`DemagBhTable`, `DemagIrreversibleBhTable`) used by `MagnetPermeabilityType` 8, and a scalar reader
+for the demagnetisation-ratio results, which are contour results (inspect them in the GUI or with `jmag_contour_image`).
 
 ## How trust works: the feedback ladder
 
@@ -196,6 +234,8 @@ The bridge checks at seven levels, cheapest first. The agent is taught to climb 
 | | load point power balance | 0.9 % |
 | 12s/4p SPM, `jmag_loss_study` | iron-loss study from the transient | stator hysteresis 1.998 W + eddy 2.047 W = 4.045 W total |
 | 12s/4p SPM, `jmag_run_cases` | design table, 2 cases (10 A, 5 A) | 1.804 / 0.910 Nm, ratio 0.504, per-case results via `case=` |
+| 24s/20p IPM, linear Sm2Co17 bars | HairpinFE twin: flux linkage / back-EMF / peak torque | within 0.25 % / 0.2 % / 0.45 % |
+| 24s/20p IPM, cast AlNiCo B-H table (build only) | `BhTable` set vs read back; pre-check of 3 studies | 126 / 126 rows identical; 3 × PASS |
 
 ## Tools by task
 
@@ -315,6 +355,9 @@ skills that encode how an engineer judges a result.
   bridge yet; NVH force export is a JMAG-provided script. The losses skill documents the export route for both.
 - Two API calls crashed Designer 23.0 in live tests (JMAG winding definitions, field value exports). The bridge refuses
   them unless `force=true`.
+- Magnets: linear and tabulated reversible B-H magnets are built and read back. JMAG's irreversible
+  (point-array) magnet model needs a table layout the script reference does not give, and the demagnetisation ratio is a
+  contour result with no scalar reader in the bridge.
 - JMAG is commercial software. This project contains none of its code or documentation. Not affiliated with JSOL
   Corporation. JMAG is a trademark of JSOL Corporation.
 
