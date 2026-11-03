@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "jmag-agent-suite"
-version = "0.3.6"
+version = "0.4.0"
 description = "All-in-one JMAG-Designer agent toolkit: MCP server, physics checks and Claude skills for electromagnetic FEA"
 readme = "README.md"
 license = { text = "MIT" }
@@ -19,7 +19,7 @@ classifiers = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7", "matplotlib>=3.7"]
-plots = ["matplotlib>=3.7"]
+plots = ["matplotlib>=3.7", "numpy>=1.22"]
 
 [project.urls]
 Homepage = "https://github.com/Zwl20085/jmag-agent-suite"

@@ -835,13 +835,39 @@ def set_material(ctx, study, parts, material, properties=None, orientation=None,
 #: demagnetisation table (IsMagnet() True, the solver aborts with "Check the point array setting").
 MAGNETIC_STEEL = 0
 BH_CURVE = 2
+#: Magnet flags (scriptMaterialEditor, 23.0): MagneticPropertyType 1 = Magnet; MagnetPermeabilityType
+#: 6 = MagnetLinearBr (ResidualMagneticFluxDensity [T] + MagnetPermeability, verified), 1 = NonLinearReversible
+#: (BhTable = demagnetisation curve; table read-back verified, solver use unverified).
+MAGNET = 1
+MAGNET_LINEAR_BR = 6
+MAGNET_NONLINEAR = 1
+
+
+def _set_bh_table(um, bh):
+    um.SetTable("BhTable", [[float(h), float(b)] for h, b in bh])
+    ds = um.GetTable("BhTable")
+    back = [[ds.GetValue(i, 0), ds.GetValue(i, 1)] for i in range(ds.GetRows())]
+    if len(back) != len(bh) or any(abs(a[0] - float(b[0])) > 1e-9 * max(1.0, abs(b[0])) or
+                                   abs(a[1] - float(b[1])) > 1e-9 for a, b in zip(back, bh)):
+        raise OpError("B-H table read-back differs from the input (%d of %d rows)" % (len(back), len(bh)),
+                      "inspect with jmag_exec_python: lib.GetUserMaterial(name).GetTable('BhTable')")
+    return back
 
 
 @op()
-def create_material(ctx, name, bh, density=None, conductivity=None, loss=None, overwrite=False,
-                    folder="Custom Materials"):
-    """Create a custom soft-magnetic material: B-H table (validated by the server), density,
-    conductivity, iron-loss formula constants. Every value is read back."""
+def create_material(ctx, name, bh=None, density=None, conductivity=None, loss=None, overwrite=False,
+                    folder="Custom Materials", kind="steel", magnet=None):
+    """Create a custom material. kind="steel": soft-magnetic B-H table (validated by the server), density,
+    conductivity, iron-loss formula constants. kind="magnet": magnet = {"model": "linear", "br": T, "mu_r": ..}
+    or {"model": "nonlinear", "bh": [[H, B], ...]} (demagnetisation curve). Every value is read back."""
+    if kind not in ("steel", "magnet"):
+        raise OpError("kind %r unknown" % (kind,), "use kind='steel' or kind='magnet'")
+    if kind == "steel" and not bh:
+        raise OpError("a steel needs bh", "bh = [[H A/m, B T], ...]")
+    if kind == "magnet" and (not magnet or magnet.get("model") not in ("linear", "nonlinear")):
+        raise OpError("a magnet needs magnet={'model': 'linear'|'nonlinear', ...}", "use jmag_create_material")
+    if kind == "magnet" and loss:
+        raise OpError("iron-loss constants are for steels", "drop loss for a magnet")
     app = ctx.need_app()
     lib = app.GetMaterialLibrary()
     if name in ctx.material_names():
@@ -851,22 +877,43 @@ def create_material(ctx, name, bh, density=None, conductivity=None, loss=None, o
         app.ClearError()
     m = need(lib.CreateCustomMaterial(name, folder), "custom material %r" % name)
     um = need(lib.GetUserMaterial(name), "material-editor view of %r" % name)
-    um.SetValue("MagneticPropertyType", MAGNETIC_STEEL)
-    um.SetValue("MagneticSteelPermeabilityType", BH_CURVE)
-    um.SetTable("BhTable", [[float(h), float(b)] for h, b in bh])
-    ds = um.GetTable("BhTable")
-    back = [[ds.GetValue(i, 0), ds.GetValue(i, 1)] for i in range(ds.GetRows())]
-    if len(back) != len(bh) or any(abs(a[0] - float(b[0])) > 1e-9 * max(1.0, abs(b[0])) or
-                                   abs(a[1] - float(b[1])) > 1e-9 for a, b in zip(back, bh)):
-        raise OpError("B-H table read-back differs from the input (%d of %d rows)" % (len(back), len(bh)),
-                      "inspect with jmag_exec_python: lib.GetUserMaterial(name).GetTable('BhTable')")
-    flags = (um.GetValue("MagneticPropertyType"), um.GetValue("MagneticSteelPermeabilityType"))
-    if flags != (MAGNETIC_STEEL, BH_CURVE) or um.IsMagnet():
-        raise OpError("material %r is not a B-H steel after setup (MagneticPropertyType, "
-                      "MagneticSteelPermeabilityType) = %s, IsMagnet = %s" % (name, flags, um.IsMagnet()),
-                      "check the Material-Editor flags with jmag_exec_python")
-    report = {"name": m.GetName(), "magnetic_property": "MagneticSteel", "permeability": "BHCurve",
-              "is_magnet": False, "bh_rows": len(back), "bh_first": back[0], "bh_last": back[-1]}
+    if kind == "steel":
+        um.SetValue("MagneticPropertyType", MAGNETIC_STEEL)
+        um.SetValue("MagneticSteelPermeabilityType", BH_CURVE)
+        back = _set_bh_table(um, bh)
+        flags = (um.GetValue("MagneticPropertyType"), um.GetValue("MagneticSteelPermeabilityType"))
+        if flags != (MAGNETIC_STEEL, BH_CURVE) or um.IsMagnet():
+            raise OpError("material %r is not a B-H steel after setup (MagneticPropertyType, "
+                          "MagneticSteelPermeabilityType) = %s, IsMagnet = %s" % (name, flags, um.IsMagnet()),
+                          "check the Material-Editor flags with jmag_exec_python")
+        report = {"name": m.GetName(), "kind": "steel", "magnetic_property": "MagneticSteel", "permeability": "BHCurve",
+                  "is_magnet": False, "bh_rows": len(back), "bh_first": back[0], "bh_last": back[-1]}
+    else:
+        um.SetValue("MagneticPropertyType", MAGNET)
+        if magnet["model"] == "linear":
+            um.SetValue("MagnetPermeabilityType", MAGNET_LINEAR_BR)
+            um.SetValue("ResidualMagneticFluxDensity", float(magnet["br"]))
+            um.SetValue("MagnetPermeability", float(magnet["mu_r"]))
+            br = um.GetValue("ResidualMagneticFluxDensity")
+            mu = um.GetValue("MagnetPermeability")
+            if not (_num_equal(br, magnet["br"]) and _num_equal(mu, magnet["mu_r"])):
+                raise OpError("magnet read-back differs: Br %s (set %s), mu_r %s (set %s)" % (br, magnet["br"], mu,
+                                                                                              magnet["mu_r"]))
+            want = MAGNET_LINEAR_BR
+            report = {"name": m.GetName(), "kind": "magnet", "model": "linear", "permeability": "MagnetLinearBr",
+                      "br_T": br, "mu_r": mu}
+        else:
+            um.SetValue("MagnetPermeabilityType", MAGNET_NONLINEAR)
+            back = _set_bh_table(um, magnet["bh"])
+            want = MAGNET_NONLINEAR
+            report = {"name": m.GetName(), "kind": "magnet", "model": "nonlinear", "permeability": "NonLinearReversible",
+                      "bh_rows": len(back), "bh_first": back[0], "bh_last": back[-1]}
+        flags = (um.GetValue("MagneticPropertyType"), um.GetValue("MagnetPermeabilityType"))
+        if flags != (MAGNET, want) or not um.IsMagnet():
+            raise OpError("material %r is not the requested magnet after setup (MagneticPropertyType, "
+                          "MagnetPermeabilityType) = %s, IsMagnet = %s" % (name, flags, um.IsMagnet()),
+                          "check the Material-Editor flags with jmag_exec_python")
+        report["is_magnet"] = True
     if density is not None:
         um.SetValueWithUnit("Density", float(density), "kg/m^3")    # plain SetValue is g/cm^3
         report["density_kg_m3"] = um.GetValueWithUnit("Density", "kg/m^3")
@@ -1621,6 +1668,75 @@ def study_facts(ctx, study, model=None):
         facts["equations"] = {}
     ctx.app.ClearError()
     return facts
+
+
+#: Mesh file the solver writes next to Designer.jplot in every case folder (ZIP with mesh.bin; verified on 23.0:
+#: same node/element/part ids as the jplot). study.WriteMeshJcf writes the same mesh, but numbers JMAG's air
+#: regions differently from the jplot (measured on 23.0), so the run's own file is preferred.
+RUN_MESH_FILE = "Designer_input.jcf"
+
+
+@op(read_only=True)
+def field_export(ctx, study, out_dir=None, step=None, case=None, model=None):
+    """Locate the files a field export reads (server side, without JMAG): the result file (.jplot) and the mesh
+    (.jcf) of a solved 2D study, plus the solved step count, the time of `step` (1-based, default = last) and the
+    model's part names. Calls only GetResultFileName / result-table reads; WriteMeshJcf (into out_dir) only when
+    the case folder has no mesh file."""
+    app = ctx.need_app()
+    s = ctx.study(study, model)
+    m = ctx.model_of(s)
+    if m.GetDimension() != 2:
+        raise OpError("field export supports 2D studies only (model %r is %sD)" % (m.GetName(), m.GetDimension()),
+                      "for 3D use jmag_contour_image")
+    stype = s.GetScriptTypeName() or ""
+    if "axisym" in stype.lower():
+        raise OpError("field export supports 2D planar studies only (%r is axisymmetric: the potential is not Az, "
+                      "flux lines and Bx/By would be mislabelled)" % stype, "use jmag_contour_image for this study")
+    if app.HasRunningProcess():
+        raise OpError("JMAG is running a solve; the result file is being written",
+                      "export fields after jmag_run_status reports finished")
+    _need_result(s, case)
+    with _CaseScope(ctx, s, case):
+        jplot = s.GetResultFileName()
+        rt = s.GetResultTable()
+        times = []
+        if rt.NumTables():
+            d = rt.GetData(0)
+            n = d.GetRows()
+            unit = ""
+            try:
+                unit = d.GetTimeUnit()
+            except Exception:
+                pass
+            times = [d.GetTime(k) for k in range(n)] if unit else []
+            solved = n
+        else:
+            solved = 1
+    if not jplot or not os.path.isfile(jplot):
+        raise OpError("result file not found: %r" % (jplot,),
+                      "multi-slice and remote-solved studies are not supported yet; jmag_solver_report shows the case folder")
+    if step is None:
+        step = solved
+    step = int(step)
+    if step < 1 or step > solved:
+        raise OpError("step %s not available; results exist for steps 1..%d" % (step, solved))
+    mesh = os.path.join(os.path.dirname(jplot), RUN_MESH_FILE)
+    mesh_source = "run"
+    if not os.path.isfile(mesh):
+        if not out_dir:
+            raise OpError("no %s next to the result file" % RUN_MESH_FILE, "pass out_dir so the mesh can be written")
+        out_dir = os.path.abspath(out_dir)
+        if not os.path.isdir(out_dir):
+            os.makedirs(out_dir)
+        mesh = os.path.join(out_dir, "%s_mesh.jcf" % re.sub(r"[^A-Za-z0-9_.-]+", "_", s.GetName()))
+        s.WriteMeshJcf(mesh)
+        mesh_source = "WriteMeshJcf"
+        if not os.path.isfile(mesh):
+            raise OpError("WriteMeshJcf did not write %s" % mesh, "is the study meshed?")
+    return {"study": s.GetName(), "model": m.GetName(), "case": case, "jplot": jplot, "mesh": mesh,
+            "mesh_source": mesh_source, "solved_steps": solved, "step": step,
+            "time": times[step - 1] if len(times) >= step else None,
+            "parts": [m.GetPartByIndex(i).GetName() for i in range(m.NumParts())]}
 
 
 # =========================================================================== advanced API (parametric cases,

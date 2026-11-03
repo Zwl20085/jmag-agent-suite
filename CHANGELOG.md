@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.4.0 (unreleased)
+
+- New: fields outside JMAG (2D studies). `jmag_field_data` exports the field of one step as plain JSON
+  (nodes in mm, triangles with quads split, part names and materials, per-element B/Bx/By/J, nodal Az, JMAG
+  node/element ids) plus per-part max/min/area-weighted mean; `jmag_field_plot` renders it with the bridge's own
+  plotting (`plotting.field` / `plotting.mesh`: flux lines, part outlines, `hide_air`, `parts`, shared colour
+  scales) and re-plots a saved JSON without JMAG (`data_path=`); `jmag_field_probe` samples a circle or segment
+  (air-gap Br/Bt with harmonics in electrical orders, THD and non-multiple orders) and draws the waveform.
+  Data come from the study's own result file through JMAG's `JplotReader.dll` and the run's
+  `Designer_input.jcf` mesh (worker op `field_export`, read-only; refused for 3D, axisymmetric and while a
+  solve runs). Verified on the 12s/4p SPM: max |B| equals `jmag_contour_image` to all digits at steps 40 and
+  129. New pure module `fielddata` (mesh.bin parser, assembly, rotor displacement, `part_stats`,
+  `nodal_average`, `probe`, `circle_points`, `segment_points`), tests in `tests/test_fielddata.py`.
+  `jmag_field_plot` hides the air regions by default (`hide_air=False` shows the full domain, both kinds) and
+  shades elemental B smoothly (`smooth=True`: values averaged onto the nodes of each part for the picture only;
+  statistics and the max marker stay elemental, annotations `values` / `shading`); `dpi=` for larger images.
+  `jmag_field_data` summarises B and J per part by default (`per_part=[...]` for others, e.g. Az).
+  `jmag_field_probe` draws the requested quantity only, with a harmonic-bar panel below it on a circle
+  (`plotting.probe`).
+- New: `jmag_create_material(kind="magnet")` - linear magnet from `br` + `mu_r` with optional
+  `temperature` / `br_temp_coeff` (Br(T) = Br20 (1 + a (T - 20)), applied value reported), or a nonlinear
+  demagnetisation curve `bh`; validated by `materials.check_magnet` and read back. `kind="steel"` (default) is
+  unchanged. Linear magnets verified on 23.0; the nonlinear table is read back but its solve is not verified.
+- `jmag_plot` points field/mesh plots to `jmag_field_plot`.
+- Plotting restyle (all server-side PNGs, `plotting.py`): one house style - white surface with a hairline
+  border, recessive grid, fixed categorical palette (never cycled; series past the 8th are grey), frameless
+  legends above the data, 160 dpi. `torque_speed` draws torque and power as two stacked panels instead of a
+  dual y axis; `fft` labels the fundamental and the largest harmonics directly on the bars; `map` (heatmap)
+  uses a one-hue sequential ramp with labelled contours and marks the best point; field plots use the
+  perceptual `magma` map. `plotting.plot()` also takes kinds `field` and `mesh` (field-data dict).
+- README figures in `docs/images/` re-rendered by the bridge itself: `spm_flux_density.png`, `spm_mesh.png`,
+  `spm_airgap_br.png`, `spm_torque.png`, `ccore_flux_density.png`.
+
 ## 0.3.6
 
 - Fix: the server process now ends within about a second of its MCP client closing stdio, also with a tool call in
