@@ -16,7 +16,7 @@ import csv
 import math
 from typing import Sequence
 
-from . import health
+from . import fielddata, health
 
 INSTALL_HINT = 'pip install "jmag-agent-suite[plots]"  (installs matplotlib into the bridge\'s Python)'
 
@@ -427,11 +427,7 @@ def torque_speed(speed_rpm: Sequence[float], torque_nm: Sequence[float], path: s
 # ----------------------------------------------------------------------------------------------- field data
 
 def _np():
-    try:
-        import numpy as np
-    except ImportError as e:  # numpy ships with matplotlib
-        raise PlottingUnavailable(f"numpy is not installed ({e})") from None
-    return np
+    return fielddata.import_numpy(PlottingUnavailable)  # numpy ships with matplotlib
 
 
 def _floats(np, seq, what: str):
@@ -543,11 +539,6 @@ def _select(fd: dict, parts) -> object:
     return sel
 
 
-def _areas(np, xy, tris):
-    a, b, c = xy[tris[:, 0]], xy[tris[:, 1]], xy[tris[:, 2]]
-    return 0.5 * np.abs((b[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1]) - (c[:, 0] - a[:, 0]) * (b[:, 1] - a[:, 1]))
-
-
 def _edges(np, tris, epart):
     """Unique triangle edges (M, 2) and a mask of outline edges: on the mesh boundary (used once) or between
     elements of different parts."""
@@ -650,7 +641,7 @@ def field(data: dict, path: str, quantity: str = "B", flux_lines: bool = True, f
     sel = _select(fd, parts)
     xy, tris, ep = fd["nodes"], fd["tris"][sel], fd["epart"][sel]
     vals, loc = fd["values"][quantity]
-    areas = _areas(np, xy, tris)
+    areas = fielddata.tri_areas(xy, tris)
     used = np.unique(tris)
     if loc == "node":
         ev = vals[tris].mean(axis=1)
@@ -718,14 +709,7 @@ def field(data: dict, path: str, quantity: str = "B", flux_lines: bool = True, f
         if flux_lines and flux_levels and "Az" in fd["values"]:
             az, azloc = fd["values"]["Az"]
             if azloc == "element":
-                a_sel = az[sel]
-                num = np.zeros(xy.shape[0])
-                den = np.zeros(xy.shape[0])
-                w = np.where(np.isfinite(a_sel), areas, 0.0)
-                for j in range(3):
-                    np.add.at(num, tris[:, j], np.nan_to_num(a_sel) * w)
-                    np.add.at(den, tris[:, j], w)
-                az = np.where(den > 0, num / np.where(den > 0, den, 1.0), np.nan)
+                az = fielddata.element_to_nodal(xy.shape[0], tris, az[sel], areas)
             azu = az[used]
             if np.isfinite(azu).any():
                 a0, a1 = float(np.nanmin(azu)), float(np.nanmax(azu))
@@ -774,13 +758,7 @@ def _part_nodal_average(np, xy, tris, ep, ev, areas):
     key = tris.astype(np.int64) * (int(ep.max()) + 1) + ep[:, None]       # (node, part) pairs
     uniq, inv = np.unique(key.reshape(-1), return_inverse=True)
     inv = inv.reshape(tris.shape)
-    w = np.where(np.isfinite(ev), areas, 0.0)
-    num = np.zeros(uniq.size)
-    den = np.zeros(uniq.size)
-    for j in range(3):
-        np.add.at(num, inv[:, j], np.nan_to_num(ev) * w)
-        np.add.at(den, inv[:, j], w)
-    vals = np.where(den > 0, num / np.where(den > 0, den, 1.0), np.nan)
+    vals = fielddata.element_to_nodal(uniq.size, inv, ev, areas)
     return xy[uniq // (int(ep.max()) + 1)], inv, vals
 
 
@@ -806,7 +784,7 @@ def mesh(data: dict, path: str, title: str | None = None, parts: Sequence[str] |
     fd = _prepare(data)
     sel = _select(fd, parts)
     xy, tris, ep = fd["nodes"], fd["tris"][sel], fd["epart"][sel]
-    areas = _areas(np, xy, tris)
+    areas = fielddata.tri_areas(xy, tris)
     used = np.unique(tris)
     pxy = xy[used]
     bbox = [float(v) for v in (*pxy.min(0), *pxy.max(0))]

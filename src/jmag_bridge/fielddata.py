@@ -7,7 +7,8 @@ Two files of a solved study's case folder hold everything a field plot needs (me
   type + centre + area, the part titles (``"Name@Material"``; JMAG's own air regions have an empty title), per step
   the result components by post key (16001 element B, 11005 nodal A ...) and the nodal displacement of moving
   (rotor) nodes. Steps are 1-based. It has no connectivity.
-* ``Designer_input.jcf`` (written next to it by every run; ``study.WriteMeshJcf(path)`` writes the same mesh) is a
+* ``Designer_input.jcf`` / ``Designer.jcf`` of the case folder (whichever holds ``mesh.bin``; else
+  ``study.WriteMeshJcf(path)``, which writes the same layout) is a
   ZIP whose member ``mesh.bin`` is a 6-byte prefix + a raw-deflate stream of an undocumented little-endian layout:
   64-byte header (``b"MJ\\0\\0"``, int32 1, node count, element count, ...), node records ``(int32 id, 3 x float64
   xyz)``, then element records ``(int32 id, int32 type, int32 1, int32 part id, node ids ...)`` with 3 node ids for
@@ -40,12 +41,40 @@ class FieldDataError(RuntimeError):
         self.hint = hint
 
 
-def _np():
+def import_numpy(error: type = None):
+    """numpy, or `error` (default FieldDataError) with an install hint. Shared with plotting."""
     try:
         import numpy as np
     except ImportError as e:
-        raise FieldDataError(f"numpy is not installed ({e})", NUMPY_HINT) from None
+        exc = error or FieldDataError
+        raise (exc(f"numpy is not installed ({e})", NUMPY_HINT) if exc is FieldDataError
+               else exc(f"numpy is not installed ({e})")) from None
     return np
+
+
+def _np():
+    return import_numpy()
+
+
+def tri_areas(xy, tris):
+    """Unsigned areas of triangles (index array (E, 3) into xy (N, 2))."""
+    a, b, c = xy[tris[:, 0]], xy[tris[:, 1]], xy[tris[:, 2]]
+    return 0.5 * abs((b[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1]) - (c[:, 0] - a[:, 0]) * (b[:, 1] - a[:, 1]))
+
+
+def element_to_nodal(n_nodes: int, tris, ev, areas):
+    """Area-weighted average of per-triangle values onto n_nodes nodes; NaN where no valued triangle touches.
+    The single implementation used by nodal_average, the probes and plotting (flux lines, smooth shading)."""
+    np = _np()
+    ev = np.asarray(ev, dtype=float)
+    w = np.where(np.isfinite(ev), areas, 0.0)
+    v = np.nan_to_num(ev) * w
+    num = np.zeros(n_nodes)
+    den = np.zeros(n_nodes)
+    for j in range(3):
+        np.add.at(num, tris[:, j], v)
+        np.add.at(den, tris[:, j], w)
+    return np.where(den > 0, num / np.where(den > 0, den, 1.0), np.nan)
 
 
 # ------------------------------------------------------------------------------------------------ quantities
@@ -156,6 +185,8 @@ def parse_mesh_bin(blob: bytes) -> Mesh:
         if nn is None:
             raise FieldDataError(f"element {int(ints[p])} has type {t}; only 2 (triangle) and 3 (quad) are supported",
                                  "2D first-order meshes only; second-order or 3D meshes are not supported yet")
+        if p + 4 + nn > ints.size:
+            raise FieldDataError(f"mesh.bin element block ends after {k} of {e} elements")
         eid[k], etype[k], epart[k] = ints[p], t, ints[p + 3]
         conn.append(tuple(int(v) for v in ints[p + 4:p + 4 + nn]))
         p += 4 + nn
@@ -166,7 +197,8 @@ def parse_mesh_bin(blob: bytes) -> Mesh:
 
 
 def read_mesh_jcf(path: str | os.PathLike) -> Mesh:
-    """Mesh of a ``.jcf`` file (ZIP with ``mesh.bin``): Designer_input.jcf of a run, or study.WriteMeshJcf output."""
+    """Mesh of a ``.jcf`` file (ZIP with ``mesh.bin``): Designer_input.jcf / Designer.jcf of a case folder, or
+    study.WriteMeshJcf output."""
     try:
         with zipfile.ZipFile(path) as z:
             names = z.namelist()
@@ -309,6 +341,22 @@ class JplotFile:
         finally:
             L.jplotDeleteComponentReader(r)
         return ids, vals
+
+    def available_steps(self, key: int, upto: int) -> list[int]:
+        """1-based steps for which the file holds post key `key` (probes readers until 1000 consecutive misses
+        after the last hit, or `upto`)."""
+        out, miss = [], 0
+        for k in range(1, int(upto) + 1):
+            r = self.lib.jplotCreateComponentReader(self.h, k, int(key))
+            if r:
+                self.lib.jplotDeleteComponentReader(r)
+                out.append(k)
+                miss = 0
+            else:
+                miss += 1
+                if out and miss > 1000:
+                    break
+        return out
 
     def displacement(self, step: int):
         """(ids, d (n, 3)) nodal displacement of moving nodes at `step` [m] (rotor of a motion condition)."""
@@ -469,28 +517,146 @@ def assemble(mesh: Mesh, titles: dict[int, str], values: dict[str, tuple[Quantit
     return data
 
 
-def export(home, jplot: str, mesh_path: str, step: int, quantities: Sequence[str] = ("B", "Az"),
+B_KEY, AZ_KEY = 16001, 11005
+DERIVED_B_NOTE = ("curl of Az per element: the result file has no element B at this step (seen on 23.0 for every run "
+                  "after the first in a project; cause not isolated); equals JMAG's element B to 1e-8 T")
+
+
+def derive_b(mesh: Mesh, az_ids, az_vals, displacement=None):
+    """Element B = curl(Az z) from nodal Az [Wb/m] at the step's node positions [m]: (Bx, By) = (dAz/dy, -dAz/dx).
+    Triangles: the constant gradient of the linear element; quads: the bilinear gradient at the element centre.
+    Measured on JMAG-Designer 23.0 (12s/4p SPM): equals JMAG's element B (key 16001) to 1e-8 T on triangles and
+    2e-14 T on the slide-layer quads. Returns (element ids, (E, 3) components) like JplotFile.component."""
+    np = _np()
+    index = {int(i): k for k, i in enumerate(mesh.node_ids.tolist())}
+    pos = mesh.xyz[:, :2].copy()
+    if displacement is not None and len(displacement[0]):
+        pos[[index[int(i)] for i in displacement[0]]] += np.asarray(displacement[1])[:, :2]
+    a = np.full(len(pos), np.nan)
+    a[[index[int(i)] for i in az_ids]] = np.asarray(az_vals)[:, 2]
+    out = np.zeros((len(mesh.conn), 3))
+    xi, et = np.array([-1.0, 1.0, 1.0, -1.0]) / 4, np.array([-1.0, -1.0, 1.0, 1.0]) / 4
+    for e, c in enumerate(mesh.conn):
+        k = [index[n] for n in c]
+        P, A = pos[k], a[k]
+        if len(c) == 3:
+            M = np.array([P[1] - P[0], P[2] - P[0]])
+            r = np.array([A[1] - A[0], A[2] - A[0]])
+        else:
+            M = np.array([[xi @ P[:, 0], xi @ P[:, 1]], [et @ P[:, 0], et @ P[:, 1]]])
+            r = np.array([xi @ A, et @ A])
+        gx, gy = np.linalg.solve(M, r)
+        out[e] = (gy, -gx, 0.0)
+    return np.asarray(mesh.elem_ids), out
+
+
+def reconcile_parts(mesh: Mesh, jp_ids, jp_parts, jp_types, jp_centres, tol: float = 1e-9) -> list[str]:
+    """Check that `mesh` is the mesh of the result file and take the per-element part ids from the jplot
+    (authoritative: its part titles name them). Refuses (FieldDataError) when element ids, types or centroids
+    differ - then the connectivity belongs to another mesh. Returns warnings (e.g. part ids remapped, as for a
+    study.WriteMeshJcf mesh, which numbers JMAG's air regions differently). Mutates mesh.elem_part."""
+    np = _np()
+    jp_ids = np.asarray(jp_ids, dtype=np.int64)
+    if len(jp_ids) != len(mesh.elem_ids) or set(jp_ids.tolist()) != set(mesh.elem_ids.tolist()):
+        raise FieldDataError(f"mesh file ({len(mesh.elem_ids)} elements) and result file ({len(jp_ids)}) differ",
+                             "the mesh was changed after the run; re-run the study or export its own mesh")
+    order = {int(i): k for k, i in enumerate(jp_ids.tolist())}
+    rows = np.array([order[int(i)] for i in mesh.elem_ids.tolist()], dtype=np.int64)
+    if np.any(np.asarray(jp_types)[rows] != mesh.elem_type):
+        raise FieldDataError("element types of the mesh file and the result file differ",
+                             "the mesh file belongs to another mesh; re-run the study to get a matching mesh")
+    index = {int(i): k for k, i in enumerate(mesh.node_ids.tolist())}
+    cen = np.array([mesh.xyz[[index[n] for n in c], :2].mean(axis=0) for c in mesh.conn])
+    span = float(np.max(np.ptp(mesh.xyz[:, :2], axis=0))) or 1.0
+    dev = float(np.max(np.hypot(*(cen - np.asarray(jp_centres)[rows, :2]).T)))
+    if dev > tol * span:
+        raise FieldDataError(f"element centres of the mesh file and the result file differ by up to {dev:.3g} m",
+                             "the mesh file belongs to another mesh; re-run the study to get a matching mesh")
+    jpart = np.asarray(jp_parts, dtype=np.int64)[rows]
+    diff = int(np.sum(jpart != mesh.elem_part))
+    warnings = []
+    if diff:
+        pairs = sorted({(int(a), int(b)) for a, b in zip(mesh.elem_part[jpart != mesh.elem_part], jpart[jpart != mesh.elem_part])})
+        warnings.append(f"{diff} elements had different part ids in the mesh file than in the result file "
+                        f"(mesh -> result: {pairs[:8]}); part ids taken from the result file")
+        mesh.elem_part = jpart
+    return warnings
+
+
+def steps_summary(steps: Sequence[int]) -> dict:
+    """{"count", "first", "last", "steps" (only when not contiguous and at most 500)}."""
+    st = sorted(int(k) for k in steps)
+    out: dict[str, Any] = {"count": len(st), "first": st[0] if st else None, "last": st[-1] if st else None}
+    if st and st != list(range(st[0], st[-1] + 1)) and len(st) <= 500:
+        out["steps"] = st
+    return out
+
+
+def export(home, jplot: str, mesh_path: str, step: int | None = None, quantities: Sequence[str] = ("B", "Az"),
            length_unit: str = "mm", time: float | None = None, case: int | None = None,
-           meta: dict | None = None) -> dict:
-    """Read a solved 2D study's jplot + mesh at 1-based `step` and assemble the field-data dict."""
+           meta: dict | None = None, max_step: int | None = None, times: Sequence[float] | None = None) -> dict:
+    """Read a solved 2D study's jplot + mesh at 1-based `step` (None = last step stored in the file) and assemble
+    the field-data dict. The available steps are those for which the file has the first requested quantity
+    (probed 1..max_step, default 100000; creating a reader costs microseconds); times[step - 1] gives "time"."""
     mesh = read_mesh_jcf(mesh_path)
+    parsed = [parse_quantity(n) for n in quantities]
     with JplotFile(home, jplot) as jp:
         titles = jp.parts()
-        e_ids = jp.elements()[0]
-        if len(e_ids) != len(mesh.elem_ids) or set(e_ids.tolist()) != set(mesh.elem_ids.tolist()):
-            raise FieldDataError(f"mesh file ({len(mesh.elem_ids)} elements) and result file ({len(e_ids)}) differ",
-                                 "the mesh was changed after the run; re-run the study or export its own mesh")
+        e_ids, e_part, e_type, e_ctr, _ = jp.elements()
+        warnings = reconcile_parts(mesh, e_ids, e_part, e_type, e_ctr)
+        upto = max_step or 100000
+        by_key: dict[int, set] = {}
+
+        def steps_of(k: int) -> set:
+            if k not in by_key:
+                by_key[k] = set(jp.available_steps(k, upto))
+            return by_key[k]
+
+        sets = []
+        for name, q in (parsed or [("B", QUANTITIES["B"])]):
+            st = steps_of(q.key)
+            if q.key == B_KEY:          # element B may be missing: derived from Az then (see derive_b)
+                st = st | steps_of(AZ_KEY)
+            if not st:
+                raise FieldDataError(f"result file has no steps with {name} (jplot key {q.key})",
+                                     "is this quantity an output of the study (study properties -> output settings)?")
+            sets.append(st)
+        avail = sorted(set.intersection(*sets))
+        summary = steps_summary(avail)
+        if not avail:
+            raise FieldDataError("the requested quantities share no stored step", "export them one at a time")
+        if step is None:
+            step = avail[-1]
+        if int(step) not in set(avail):
+            raise FieldDataError(f"step {step} is not stored in the result file",
+                                 f"stored steps: {summary['count']} from {summary['first']} to {summary['last']}"
+                                 + (f" ({summary['steps'][:20]}...)" if "steps" in summary else "")
+                                 + "; output-step control may store only some steps")
+        step = int(step)
         vals = {}
-        for name in quantities:
-            name, q = parse_quantity(name)
+        derived = []
+        disp = jp.displacement(step)
+        for name, q in parsed:
             got = jp.component(step, q.key)
+            if got is None and q.key == B_KEY:
+                az = jp.component(step, AZ_KEY)
+                if az is not None:
+                    got = derive_b(mesh, az[0], az[1], disp)
+                    derived.append(name)
             if got is None:
                 raise FieldDataError(f"result file has no {name} (jplot key {q.key}) at step {step}",
-                                     "check the step range and that the quantity is an output of this study "
-                                     "(study properties -> output settings)")
+                                     "check that the quantity is an output of this study (study properties -> "
+                                     "output settings)")
             vals[name] = (q, got[0], got[1])
-        disp = jp.displacement(step)
-    return assemble(mesh, titles, vals, disp, length_unit, step, time, case, meta)
+    if times is not None and 1 <= step <= len(times):
+        time = times[step - 1]
+    data = assemble(mesh, titles, vals, disp, length_unit, step, time, case, meta)
+    data["available_steps"] = summary
+    for name in derived:
+        data["quantities"][name]["source"] = DERIVED_B_NOTE
+    if warnings:
+        data["warnings"] = warnings
+    return data
 
 
 # ------------------------------------------------------------------------------------------------ analysis
@@ -512,11 +678,6 @@ def _fd_arrays(data: dict, quantity: str):
     return xy, tris, v, loc
 
 
-def _tri_areas(np, xy, tris):
-    a, b, c = xy[tris[:, 0]], xy[tris[:, 1]], xy[tris[:, 2]]
-    return 0.5 * np.abs((b[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1]) - (c[:, 0] - a[:, 0]) * (b[:, 1] - a[:, 1]))
-
-
 def element_values(data: dict, quantity: str):
     """Per-triangle values (nodal quantities: mean of the 3 nodes, the convention plotting.field uses)."""
     np = _np()
@@ -530,16 +691,8 @@ def nodal_average(data: dict, quantity: str) -> list:
     xy, tris, v, loc = _fd_arrays(data, quantity)
     if loc == "node":
         return [None if not math.isfinite(a) else float(a) for a in v.tolist()]
-    w = _tri_areas(np, xy, tris)
-    ok = np.isfinite(v)
-    num = np.zeros(len(xy))
-    den = np.zeros(len(xy))
-    for j in range(3):
-        np.add.at(num, tris[ok, j], (v * w)[ok])
-        np.add.at(den, tris[ok, j], w[ok])
-    with np.errstate(invalid="ignore", divide="ignore"):
-        out = num / den
-    return [None if not (d > 0) else float(a) for a, d in zip(out.tolist(), den.tolist())]
+    out = element_to_nodal(len(xy), tris, v, tri_areas(xy, tris))
+    return [None if not math.isfinite(a) else float(a) for a in out.tolist()]
 
 
 def part_stats(data: dict, quantity: str) -> dict:
@@ -549,7 +702,7 @@ def part_stats(data: dict, quantity: str) -> dict:
     np = _np()
     xy, tris, _, _ = _fd_arrays(data, quantity)
     ev = element_values(data, quantity)
-    w = _tri_areas(np, xy, tris)
+    w = tri_areas(xy, tris)
     ep = np.asarray(data["element_part"], dtype=np.int64)
     cen = xy[tris].mean(axis=1)
     per: dict[str, dict] = {}
@@ -630,6 +783,58 @@ def locate(data: dict, points: Sequence[Sequence[float]], chunk: int = 64):
     return tri, bary
 
 
+DERIVED = {"Br": ("Bx", "By"), "Bt": ("Bx", "By")}
+
+
+def probe_many(data: dict, quantities: Sequence[str], points: Sequence[Sequence[float]], method: str = "auto",
+               center: Sequence[float] = (0.0, 0.0)) -> dict:
+    """probe() for several quantities from one point location: {name: {"values", "inside", "method",
+    "location"}}. Br / Bt reuse the Bx / By evaluation; nodal averages are computed once per quantity."""
+    np = _np()
+    if method not in ("auto", "element", "nodal"):
+        raise FieldDataError(f"method {method!r} unknown", "use auto, element or nodal")
+    pts = np.asarray(points, dtype=float).reshape(-1, 2)
+    tri, bary = locate(data, pts)
+    inside = int((tri >= 0).sum())
+    tris = np.asarray(data["elements"], dtype=np.int64)
+    cache: dict[str, dict] = {}
+
+    def base(q: str) -> dict:
+        if q in cache:
+            return cache[q]
+        _, _, v, loc = _fd_arrays(data, q)
+        if loc == "element" and method in ("auto", "element"):
+            vals = [None if t < 0 or not math.isfinite(v[t]) else float(v[t]) for t in tri.tolist()]
+            used = "element"
+        else:
+            nv = v if loc == "node" else np.array([np.nan if a is None else a for a in nodal_average(data, q)])
+            vals = []
+            for t, l in zip(tri.tolist(), bary):
+                y = float(np.dot(l, nv[tris[t]])) if t >= 0 else math.nan
+                vals.append(y if math.isfinite(y) else None)
+            used = "linear" if loc == "node" else "nodal"
+        cache[q] = {"values": vals, "inside": inside, "method": used, "location": loc}
+        return cache[q]
+
+    th = np.arctan2(pts[:, 1] - center[1], pts[:, 0] - center[0])
+    out = {}
+    for q in quantities:
+        if q in DERIVED:
+            bx, by = base("Bx"), base("By")
+            vals = []
+            for x, y, t in zip(bx["values"], by["values"], th):
+                if x is None or y is None:
+                    vals.append(None)
+                elif q == "Br":
+                    vals.append(float(x * math.cos(t) + y * math.sin(t)))
+                else:
+                    vals.append(float(-x * math.sin(t) + y * math.cos(t)))
+            out[q] = {"values": vals, "inside": inside, "method": bx["method"], "location": bx["location"]}
+        else:
+            out[q] = base(q)
+    return out
+
+
 def probe(data: dict, quantity: str, points: Sequence[Sequence[float]], method: str = "auto",
           center: Sequence[float] = (0.0, 0.0)) -> dict:
     """Values of `quantity` at points [length_unit]. Nodal quantities: linear interpolation inside the containing
@@ -638,39 +843,7 @@ def probe(data: dict, quantity: str, points: Sequence[Sequence[float]], method: 
     "nodal" (linear interpolation of the area-weighted nodal average: smoother, slightly lower peaks). Derived
     quantities "Br" / "Bt" are the radial / tangential components of (Bx, By) about `center`.
     Points outside the mesh give None. Returns {"values", "inside", "method", "location"}."""
-    np = _np()
-    pts = np.asarray(points, dtype=float).reshape(-1, 2)
-    if quantity in ("Br", "Bt"):
-        bx = probe(data, "Bx", pts, method)
-        by = probe(data, "By", pts, method)
-        th = np.arctan2(pts[:, 1] - center[1], pts[:, 0] - center[0])
-        vals = []
-        for x, y, t in zip(bx["values"], by["values"], th):
-            if x is None or y is None:
-                vals.append(None)
-            elif quantity == "Br":
-                vals.append(float(x * math.cos(t) + y * math.sin(t)))
-            else:
-                vals.append(float(-x * math.sin(t) + y * math.cos(t)))
-        return {"values": vals, "inside": bx["inside"], "method": bx["method"], "location": bx["location"]}
-    xy, tris, v, loc = _fd_arrays(data, quantity)
-    if method not in ("auto", "element", "nodal"):
-        raise FieldDataError(f"method {method!r} unknown", "use auto, element or nodal")
-    tri, bary = locate(data, pts)
-    if loc == "element" and method in ("auto", "element"):
-        vals = [None if t < 0 or not math.isfinite(v[t]) else float(v[t]) for t in tri.tolist()]
-        used = "element"
-    else:
-        nv = v if loc == "node" else np.array([np.nan if a is None else a for a in nodal_average(data, quantity)])
-        vals = []
-        for t, l in zip(tri.tolist(), bary):
-            if t < 0:
-                vals.append(None)
-                continue
-            y = float(np.dot(l, nv[tris[t]]))
-            vals.append(y if math.isfinite(y) else None)
-        used = "linear" if loc == "node" else "nodal"
-    return {"values": vals, "inside": int((tri >= 0).sum()), "method": used, "location": loc}
+    return probe_many(data, [quantity], points, method, center)[quantity]
 
 
 # ------------------------------------------------------------------------------------------------ files

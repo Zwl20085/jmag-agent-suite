@@ -1670,18 +1670,30 @@ def study_facts(ctx, study, model=None):
     return facts
 
 
-#: Mesh file the solver writes next to Designer.jplot in every case folder (ZIP with mesh.bin; verified on 23.0:
-#: same node/element/part ids as the jplot). study.WriteMeshJcf writes the same mesh, but numbers JMAG's air
-#: regions differently from the jplot (measured on 23.0), so the run's own file is preferred.
-RUN_MESH_FILE = "Designer_input.jcf"
+#: Mesh files of a case folder that hold the run's mesh as mesh.bin, in order of preference (measured on 23.0):
+#: Designer_input.jcf (seen after the first run of a new project), Designer.jcf (holds mesh.bin after later runs;
+#: after the first run it held an empty mesh.dat). Both had the jplot's node/element/part ids. study.WriteMeshJcf
+#: (last resort) writes the same mesh but numbered JMAG's air regions differently; the server checks every mesh
+#: against the jplot (ids, types, centres) and takes the part ids from the jplot.
+RUN_MESH_FILES = ("Designer_input.jcf", "Designer.jcf")
+
+
+def _has_mesh_bin(path):
+    import zipfile
+    try:
+        with zipfile.ZipFile(path) as z:
+            return "mesh.bin" in z.namelist()
+    except (OSError, zipfile.BadZipFile):
+        return False
 
 
 @op(read_only=True)
 def field_export(ctx, study, out_dir=None, step=None, case=None, model=None):
     """Locate the files a field export reads (server side, without JMAG): the result file (.jplot) and the mesh
-    (.jcf) of a solved 2D study, plus the solved step count, the time of `step` (1-based, default = last) and the
-    model's part names. Calls only GetResultFileName / result-table reads; WriteMeshJcf (into out_dir) only when
-    the case folder has no mesh file."""
+    (.jcf) of a solved 2D study, plus the solved step count, the time axis of the result table and the
+    model's part names. step None = let the server pick the last step stored in the result file. Calls only
+    GetResultFileName / result-table reads; WriteMeshJcf (into out_dir) only when the case folder has no mesh file
+    (its part ids are reconciled with the jplot server-side)."""
     app = ctx.need_app()
     s = ctx.study(study, model)
     m = ctx.model_of(s)
@@ -1715,16 +1727,20 @@ def field_export(ctx, study, out_dir=None, step=None, case=None, model=None):
     if not jplot or not os.path.isfile(jplot):
         raise OpError("result file not found: %r" % (jplot,),
                       "multi-slice and remote-solved studies are not supported yet; jmag_solver_report shows the case folder")
-    if step is None:
-        step = solved
-    step = int(step)
-    if step < 1 or step > solved:
-        raise OpError("step %s not available; results exist for steps 1..%d" % (step, solved))
-    mesh = os.path.join(os.path.dirname(jplot), RUN_MESH_FILE)
-    mesh_source = "run"
-    if not os.path.isfile(mesh):
+    if step is not None:   # which steps the file holds is checked server-side (output-step control may subsample)
+        step = int(step)
+        if step < 1 or step > solved:
+            raise OpError("step %s not available; the study has steps 1..%d" % (step, solved))
+    mesh, mesh_source = None, None
+    for name in RUN_MESH_FILES:
+        cand = os.path.join(os.path.dirname(jplot), name)
+        if os.path.isfile(cand) and _has_mesh_bin(cand):
+            mesh, mesh_source = cand, name
+            break
+    if mesh is None:
         if not out_dir:
-            raise OpError("no %s next to the result file" % RUN_MESH_FILE, "pass out_dir so the mesh can be written")
+            raise OpError("no mesh file next to the result file (%s)" % ", ".join(RUN_MESH_FILES),
+                          "pass out_dir so the mesh can be written with WriteMeshJcf")
         out_dir = os.path.abspath(out_dir)
         if not os.path.isdir(out_dir):
             os.makedirs(out_dir)
@@ -1734,8 +1750,8 @@ def field_export(ctx, study, out_dir=None, step=None, case=None, model=None):
         if not os.path.isfile(mesh):
             raise OpError("WriteMeshJcf did not write %s" % mesh, "is the study meshed?")
     return {"study": s.GetName(), "model": m.GetName(), "case": case, "jplot": jplot, "mesh": mesh,
-            "mesh_source": mesh_source, "solved_steps": solved, "step": step,
-            "time": times[step - 1] if len(times) >= step else None,
+            "mesh_source": mesh_source, "solved_steps": solved, "step": step, "times": times,
+            "time": times[step - 1] if step is not None and len(times) >= step else None,
             "parts": [m.GetPartByIndex(i).GetName() for i in range(m.NumParts())]}
 
 

@@ -9,7 +9,7 @@
   scales) and re-plots a saved JSON without JMAG (`data_path=`); `jmag_field_probe` samples a circle or segment
   (air-gap Br/Bt with harmonics in electrical orders, THD and non-multiple orders) and draws the waveform.
   Data come from the study's own result file through JMAG's `JplotReader.dll` and the run's
-  `Designer_input.jcf` mesh (worker op `field_export`, read-only; refused for 3D, axisymmetric and while a
+  case-folder mesh (`Designer_input.jcf` / `Designer.jcf`, else `WriteMeshJcf`; worker op `field_export`, read-only; refused for 3D, axisymmetric and while a
   solve runs). Verified on the 12s/4p SPM: max |B| equals `jmag_contour_image` to all digits at steps 40 and
   129. New pure module `fielddata` (mesh.bin parser, assembly, rotor displacement, `part_stats`,
   `nodal_average`, `probe`, `circle_points`, `segment_points`), tests in `tests/test_fielddata.py`.
@@ -19,6 +19,16 @@
   `jmag_field_data` summarises B and J per part by default (`per_part=[...]` for others, e.g. Az).
   `jmag_field_probe` draws the requested quantity only, with a harmonic-bar panel below it on a circle
   (`plotting.probe`).
+  The default step is the last step stored in the result file and `available_steps` (count / first / last)
+  is reported, because output-step control can store only some steps; a missing step is refused with that range.
+  The mesh is checked against the result file (element ids, types and centres); when only the part ids differ (a
+  `study.WriteMeshJcf` mesh numbers JMAG's air regions differently) they are taken from the result file and a
+  `warnings` entry says so. An explicit `parts=` overrides `hide_air`, unknown part names are an error listing
+  the valid ones. The field JSON is written once per export and only after a successful render. Probes locate
+  the points once for all components. When the result file holds no element B (all runs after the first in a
+  project, measured) B/Bx/By are derived as the curl of Az (equal to JMAG's element B to 1e-8 T).
+- Requirement: the `plots` and `dev` extras now need matplotlib >= 3.8 (field plots call `set_path_effects` on
+  a contour set, which 3.7 lacks); renderer errors come back as an envelope with that hint.
 - New: `jmag_create_material(kind="magnet")` - linear magnet from `br` + `mu_r` with optional
   `temperature` / `br_temp_coeff` (Br(T) = Br20 (1 + a (T - 20)), applied value reported), or a nonlinear
   demagnetisation curve `bh`; validated by `materials.check_magnet` and read back. `kind="steel"` (default) is

@@ -169,7 +169,10 @@ Details: `jmag-experiments` -> `references/pmsm.md` section 2c; `static-3d.md` s
   mesh). Part ids are 1-based; titles `Name@Material`; JMAG's own air regions have an empty title (here id 20
   = rotor-side air incl. the quad layer, r 27.4-30.5 mm; id 21 = stator-side gap + outer air, r 30.8-146.5 mm);
   a suppressed part keeps its title but has no elements.
-- The jplot has no connectivity. The run writes `Designer_input.jcf` next to it: a ZIP whose `mesh.bin` is a
+- The jplot has no connectivity. The first run of a new project left `Designer_input.jcf` next to it; three later
+  runs (duplicated studies, 2026-11-03) left none, but their `Designer.jcf` held the same `mesh.bin` with the jplot's
+  part ids (after the first run `Designer.jcf` held only an empty `mesh.dat`; `mesh_cache_post.jcf` uses another
+  layout). Each is a ZIP whose `mesh.bin` is a
   6-byte prefix + raw deflate of a 64-byte header (`b"MJ\0\0"`, int32 1, node count, element count, ...),
   nodes `(int32 id, 3 x float64)` and elements `(int32 id, int32 type, int32 1, int32 part id, 3 or 4 node
   ids)`, all counter-clockwise. Node ids and coordinates (to 5e-13 m), element ids, types and part ids equal
@@ -192,3 +195,12 @@ Details: `jmag-experiments` -> `references/pmsm.md` section 2c; `static-3d.md` s
   + `MagnetPermeability` read back exactly (1.2 T / 1.056 T at 20 / 120 degC with -0.0012 1/K, mu_r 1.05);
   `MagnetPermeabilityType` 1 + `BhTable` with negative H read back row-for-row; `IsMagnet()` True. Solving with
   the nonlinear table was not tried.
+- Element B (key 16001) was in the jplot of the project's first run only. Three later runs (plain duplicate of the
+  study; duplicates with `OutputTimingMode` 1 / `OutputStartStep` 65, `OutputTimingSameStep` 0, and with
+  `OutputResultsTimingMode` 1 / `OutputResultsStartStep` 65) stored no 16001 at any step (jplot 219 MB vs 318 MB);
+  cause not isolated. Nodal A (11005), J, magnetisation, permeance factor were stored at all 129 steps in every case,
+  so neither output setting thinned the jplot (subsampled steps not reproduced). B as the curl of A per element
+  equals the stored 16001 to 1e-8 T on triangles and 2e-14 T on the slide-layer quads (bilinear gradient at the
+  centre), and its max equals `ContourMaxValue` at steps 65, 100, 129 (2.2035617, 2.2313241, 2.2035609 T).
+- `study.WriteMeshJcf` mesh of the first run: 1713 elements carry part id 22 where the jplot has 20 (same element
+  ids, types and centres); taking the part ids from the jplot gives the same parts and max |B| as the run's file.

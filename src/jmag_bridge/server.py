@@ -897,9 +897,12 @@ async def jmag_contour_image(study: str, result_type: str = "MagneticFluxDensity
 # =========================================================================== fields outside JMAG
 
 READ_ONLY_OPS |= {"field_export"}
-_FIELD_CACHE: dict = {}      # (jplot, mtime, step, quantities) -> field data; the last few exports
+_FIELD_CACHE: dict = {}      # (jplot, mtime, step, quantities) -> {"data", "path"}; the last few exports
 _FIELD_CACHE_SIZE = 4
 B_FAMILY = ("B", "Br", "Bt")
+RENDER_ERRORS = (AttributeError, RuntimeError)
+RENDER_HINT = ('the field renderer failed inside matplotlib; field plots need matplotlib >= 3.8: '
+               'pip install -U "jmag-agent-suite[plots]"')
 
 
 def _sig(v: Any, n: int = 6) -> Any:
@@ -923,30 +926,30 @@ def _field_quantities(names: list[str]) -> list[str]:
 
 
 async def _load_field(study: str | None, step: int | None, quantities: list[str], case: int | None,
-                      model: str | None, data_path: str | None = None) -> tuple[dict | None, dict]:
-    """Field data from a saved JSON (data_path) or exported from the study's result files. Returns (data, envelope);
-    data is None when the envelope is an error."""
+                      model: str | None, data_path: str | None = None) -> tuple[dict | None, dict, dict | None]:
+    """Field data from a saved JSON (data_path) or exported from the study's result files. Returns (data, envelope,
+    cache entry {"data", "path"} or None); data is None when the envelope is an error."""
     if data_path:
         try:
             data = await asyncio.to_thread(fielddata.load, data_path)
         except fielddata.FieldDataError as e:
-            return None, _bad_input(e, e.hint or "pass the path jmag_field_data returned")
+            return None, _bad_input(e, e.hint or "pass the path jmag_field_data returned"), None
         missing = [q for q in quantities if q not in data.get("values", {})]
         if missing:
             return None, _bad_input(ValueError(f"{data_path} has no {missing}; it has {sorted(data.get('values', {}))}"),
-                                    "export them with jmag_field_data(quantities=[...]) or drop them")
-        return data, {"ok": True, "result": {"data_path": data_path}}
+                                    "export them with jmag_field_data(quantities=[...]) or drop them"), None
+        return data, {"ok": True, "result": {"data_path": data_path}}, None
     if not study:
         return None, _bad_input(ValueError("pass study (export from JMAG) or data_path (a saved field-data JSON)"),
-                                "e.g. study='Load' (needs a solved 2D study)")
+                                "e.g. study='Load' (needs a solved 2D study)"), None
     try:
         quantities = _field_quantities(quantities)
     except fielddata.FieldDataError as e:
-        return None, _bad_input(e, e.hint or "")
+        return None, _bad_input(e, e.hint or ""), None
     env = await run_op("field_export", 300, study=study, step=step, case=case, model=model,
                        out_dir=str(state_dir() / "outputs"))
     if not env["ok"]:
-        return None, env
+        return None, env, None
     r = env["result"]
     try:
         mtime = os.path.getmtime(r["jplot"])
@@ -954,26 +957,39 @@ async def _load_field(study: str | None, step: int | None, quantities: list[str]
         mtime = None
     key = (r["jplot"], mtime, r["step"], tuple(sorted(quantities)))
     if key in _FIELD_CACHE:
-        return _FIELD_CACHE[key], env
+        return _FIELD_CACHE[key]["data"], env, _FIELD_CACHE[key]
     meta = {"study": r["study"], "model": r["model"], "jplot": r["jplot"], "mesh": r["mesh"],
             "mesh_source": r["mesh_source"], "solved_steps": r["solved_steps"],
             "jmag_version": B.install.version if B.install else None}
     try:
         data = await asyncio.to_thread(fielddata.export, B.install.home if B.install else None, r["jplot"], r["mesh"],
-                                       r["step"], quantities, "mm", r.get("time"), case, meta)
+                                       r["step"], quantities, "mm", None, case, meta, r.get("solved_steps"),
+                                       r.get("times"))
     except fielddata.FieldDataError as e:
-        return None, _bad_input(e, e.hint or "")
-    _FIELD_CACHE[key] = data
+        return None, _bad_input(e, e.hint or ""), None
+    entry = {"data": data, "path": None}
+    _FIELD_CACHE[key] = entry
     while len(_FIELD_CACHE) > _FIELD_CACHE_SIZE:
         _FIELD_CACHE.pop(next(iter(_FIELD_CACHE)))
-    return data, env
+    return data, env, entry
+
+
+def _save_field(data: dict, entry: dict | None, out: str | None = None) -> str:
+    """Write the field JSON once per export: reuse the cached file unless an explicit `out` path is asked for."""
+    if out is None and entry is not None and entry.get("path") and os.path.isfile(entry["path"]):
+        return entry["path"]
+    path = fielddata.save(data, out_path("field", out, ".json"))
+    if entry is not None and (out is None or not entry.get("path")):
+        entry["path"] = path
+    return path
 
 
 def _field_summary(data: dict) -> dict:
     return {"nodes": len(data["nodes"]), "elements": len(data["elements"]), "parts": data["parts"],
             "part_materials": data.get("part_materials"), "step": data.get("step"), "time": data.get("time"),
             "case": data.get("case"), "length_unit": data.get("length_unit"),
-            "solved_steps": (data.get("source") or {}).get("solved_steps")}
+            "solved_steps": (data.get("source") or {}).get("solved_steps"),
+            "available_steps": data.get("available_steps")}
 
 
 @mcp.tool(annotations=READ_ONLY)
@@ -983,11 +999,15 @@ async def jmag_field_data(study: str, step: int | None = None, quantities: list[
     """Export a solved 2D study's field at one step as plain data (JSON file) for plots and numbers outside JMAG,
     plus per-part statistics. The arrays are written to the file, never returned in the envelope.
 
-    Reads the study's own result file (Designer.jplot, via JMAG's JplotReader.dll) and the run's mesh
-    (Designer_input.jcf) - no contour definitions, no GUI, ~0.5 s for a 28k-element motor. Verified on
+    Reads the study's own result file (Designer.jplot, via JMAG's JplotReader.dll) and the case folder's mesh
+    (Designer_input.jcf or Designer.jcf, else WriteMeshJcf; always checked against the result file, part ids
+    taken from it - see result.warnings) - no contour definitions, no GUI, ~0.5 s for a 28k-element motor.
+    When the result file has no element B (seen for every run after the first in a project) B/Bx/By are the
+    curl of Az per element, equal to JMAG's element B to 1e-8 T (quantities[...].source says so). Verified on
     JMAG-Designer 23.0 (12s/4p SPM, Transient2D with rotation): max |B| equals jmag_contour_image's max at the
     same step; node/element ids match JMAG's.
-    step: 1-based (default last solved step). case: design-table case (0-based; unverified - tested on the
+    step: 1-based (default the last step stored in the result file; result.available_steps gives count / first /
+    last - output-step control can store only some steps). case: design-table case (0-based; unverified - tested on the
     current case only). quantities (default ["B", "Az"]):
       B (|B|, T, per element), Bx, By (T, per element), Az (vector potential, Wb/m, per node: flux lines),
       J (current density z, A/m^2, conductors only, verified = N*I/slot area);
@@ -1006,12 +1026,11 @@ async def jmag_field_data(study: str, step: int | None = None, quantities: list[
     2D only. Refused while a solve runs.
     """
     qs = list(quantities) if quantities else ["B", "Az"]
-    data, env = await _load_field(study, step, qs, case, model)
+    data, env, entry = await _load_field(study, step, qs, case, model)
     if data is None:
         return env
-    path = out_path("field", out, ".json")
     try:
-        path = await asyncio.to_thread(fielddata.save, data, path)
+        path = await asyncio.to_thread(_save_field, data, entry, out)
         want = per_part if per_part is not None else [q for q in ("B", "J") if q in data["values"]]
         stats = {q: fielddata.part_stats(data, q) for q in want if q in data["values"]}
     except (OSError, fielddata.FieldDataError) as e:
@@ -1023,16 +1042,26 @@ async def jmag_field_data(study: str, step: int | None = None, quantities: list[
            "max": {q: _sig(s.get("max")) for q, s in stats.items()},
            "at_max": {q: s.get("at_max") for q, s in stats.items()},
            "part_at_max": {q: s.get("part_at_max") for q, s in stats.items()}}
+    if data.get("warnings"):
+        res["warnings"] = data["warnings"]
     return {"ok": True, "result": res, **({"seconds": env["seconds"]} if env.get("seconds") is not None else {})}
 
 
 def _visible_parts(data: dict, parts: list[str] | None, hide_air: bool) -> list[str] | None:
-    if not hide_air:
-        return parts
-    mats = data.get("part_materials") or [""] * len(data["parts"])
+    """Parts to draw. An explicit `parts` list wins over hide_air (so an air part can be asked for by name);
+    unknown names raise ValueError listing the valid ones."""
     used = set(data["element_part"])
-    keep = [p for k, (p, m) in enumerate(zip(data["parts"], mats)) if k in used and (m or "").lower() != "air"]
-    return [p for p in keep if parts is None or p in parts]
+    names = [p for k, p in enumerate(data["parts"]) if k in used]
+    if parts is not None:
+        parts = [parts] if isinstance(parts, str) else list(parts)
+        unknown = [p for p in parts if p not in names]
+        if unknown:
+            raise ValueError(f"parts {unknown} not in the field data; parts with elements: {names}")
+        return parts
+    if not hide_air:
+        return None
+    mats = data.get("part_materials") or [""] * len(data["parts"])
+    return [p for k, (p, m) in enumerate(zip(data["parts"], mats)) if k in used and (m or "").lower() != "air"]
 
 
 @mcp.tool(annotations=READ_ONLY)
@@ -1063,18 +1092,16 @@ async def jmag_field_plot(study: str | None = None, step: int | None = None, qua
     """
     if kind not in ("field", "mesh"):
         return with_image(_bad_input(ValueError(f"kind {kind!r} unknown"), "use kind='field' or kind='mesh'"))
-    if not hasattr(plotting, "field") or not hasattr(plotting, "mesh"):
-        return with_image(_bad_input(RuntimeError("this bridge build has no field plotting"), "update jmag-agent-suite"))
     need = ([quantity] if kind == "field" else []) + (["Az"] if kind == "field" and flux_lines and quantity != "Az" else [])
-    data, env = await _load_field(study, step, need if not data_path else [q for q in need if q != "Az"], case, model,
-                                  data_path)
+    data, env, entry = await _load_field(study, step, need if not data_path else [q for q in need if q != "Az"],
+                                         case, model, data_path)
     if data is None:
         return with_image(env)
-    saved = data_path
-    if not data_path:
-        saved = await asyncio.to_thread(fielddata.save, data, out_path("field", None, ".json"))
     try:
         show = _visible_parts(data, parts, hide_air)
+    except ValueError as e:
+        return with_image(_bad_input(e, "pass part names from the list above (jmag_field_data lists parts)"))
+    try:
         path = out_path(f"field_{kind}", out)
         if kind == "field":
             res = await asyncio.to_thread(plotting.field, data, path, quantity=quantity,
@@ -1088,8 +1115,13 @@ async def jmag_field_plot(study: str | None = None, step: int | None = None, qua
         return with_image(_bad_input(e, plotting.INSTALL_HINT))
     except (ValueError, TypeError, KeyError) as e:
         return with_image(_bad_input(e, "check quantity / parts against jmag_field_data's parts and quantities"))
+    except RENDER_ERRORS as e:
+        return with_image(_bad_input(e, RENDER_HINT))
+    saved = data_path or await asyncio.to_thread(_save_field, data, entry)
     res["annotations"] = _sig(res.get("annotations"))
     res.update({"data_path": saved, **_field_summary(data)})
+    if data.get("warnings"):
+        res["warnings"] = data["warnings"]
     res.pop("parts", None)
     return with_image({"ok": True, "result": res})
 
@@ -1170,11 +1202,11 @@ async def jmag_field_probe(study: str | None = None, step: int | None = None, qu
         return with_image(_bad_input(e, "circle={'r': mm, 'n': 360} or segment={'from': [x, y], 'to': [x, y], 'n': 100}"))
     series_names = [quantity] + (["Br", "Bt"] if quantity == "B" and circle is not None else [])
     need = ["B", "Bx", "By"] if quantity in B_FAMILY else [quantity]
-    data, env = await _load_field(study, step, need, case, model, data_path)
+    data, env, _ = await _load_field(study, step, need, case, model, data_path)
     if data is None:
         return with_image(env)
     try:
-        probes = {q: await asyncio.to_thread(fielddata.probe, data, q, pts, method, center) for q in series_names}
+        probes = await asyncio.to_thread(fielddata.probe_many, data, series_names, pts, method, center)
     except fielddata.FieldDataError as e:
         return with_image(_bad_input(e, e.hint or "check quantity and method"))
     series = {q: p["values"] for q, p in probes.items()}
@@ -1213,6 +1245,8 @@ async def jmag_field_probe(study: str | None = None, step: int | None = None, qu
         res["annotations"] = img["annotations"]
     except plotting.PlottingUnavailable as e:
         res["plot_error"] = f"{e} - {plotting.INSTALL_HINT}"
+    except RENDER_ERRORS as e:
+        res["plot_error"] = f"{type(e).__name__}: {e} - {RENDER_HINT}"
     res["x"] = _sig(x)
     res["values"] = {q: _sig(v) for q, v in series.items()}
     return with_image({"ok": True, "result": res})

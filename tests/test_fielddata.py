@@ -378,3 +378,143 @@ def test_probe_figure_has_harmonic_panel(fake, tmp_path):
                                               pole_pairs=1, out=str(tmp_path / "p.png")))
     env = json.loads(out[0])
     assert env["ok"] and set(env["result"]["values"]) == {"Br"} and "bars" in env["result"]["annotations"]
+
+
+# ------------------------------------------------------------------------------------------- review fixes
+
+def _jp_elements(parts=(1, 2, 2), types=(3, 2, 2), shift=0.0):
+    ids = [e[0] for e in ELEMS]
+    cen = [np.mean([NODES[n] for n in e[3]], axis=0) + shift for e in ELEMS]
+    return np.array(ids), np.array(parts), np.array(types), np.array([[c[0], c[1], 0.0] for c in cen])
+
+
+def test_mesh_bin_truncated_node_ids():
+    blob = mesh_bin(elems=[(7, 3, 1, (10, 11, 12, 13)), (8, 2, 2, (11, 14))])   # last element short by one id
+    with pytest.raises(F.FieldDataError, match="ends after 1 of 2 elements"):
+        F.parse_mesh_bin(blob)
+
+
+def test_reconcile_parts_takes_jplot_part_ids(tmp_path):
+    mesh = F.read_mesh_jcf(jcf(tmp_path))
+    assert F.reconcile_parts(mesh, *_jp_elements()) == []
+    w = F.reconcile_parts(mesh, *_jp_elements(parts=(1, 3, 3)))       # e.g. WriteMeshJcf air numbering
+    assert mesh.elem_part.tolist() == [1, 3, 3] and "2 elements" in w[0] and "(2, 3)" in w[0]
+
+
+@pytest.mark.parametrize("kw, match", [({"types": (2, 2, 2)}, "types"), ({"shift": 0.01}, "centres")])
+def test_reconcile_parts_refuses_another_mesh(tmp_path, kw, match):
+    mesh = F.read_mesh_jcf(jcf(tmp_path))
+    with pytest.raises(F.FieldDataError, match=match) as e:
+        F.reconcile_parts(mesh, *_jp_elements(**kw))
+    assert "re-run" in e.value.hint
+
+
+class FakeJplot:
+    """Stand-in for JplotFile: steps 1, 5, 9 stored (output-step control), part ids differ from the mesh."""
+    steps = (1, 5, 9)
+
+    def __init__(self, home, path):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def parts(self):
+        return {1: "Core@35JN210", 2: "Magnet@N40H", 4: ""}
+
+    def elements(self):
+        ids, parts, types, cen = _jp_elements(parts=(1, 4, 4))
+        return ids, parts, types, cen, np.ones(3)
+
+    def available_steps(self, key, upto):
+        return [k for k in self.steps if k <= upto]
+
+    def component(self, step, key):
+        if step not in self.steps:
+            return None
+        v = values()
+        return (v["B"][1], v["B"][2]) if key == 16001 else (v["Az"][1], v["Az"][2])
+
+    def displacement(self, step):
+        return np.zeros(0, dtype=np.int64), np.zeros((0, 3))
+
+
+def test_export_steps_and_part_remap(tmp_path, monkeypatch):
+    monkeypatch.setattr(F, "JplotFile", FakeJplot)
+    p = str(jcf(tmp_path))
+    d = F.export(None, "x.jplot", p, None, ["B", "Az"], times=[0.1 * k for k in range(1, 10)])
+    assert d["step"] == 9 and abs(d["time"] - 0.9) < 1e-12
+    assert d["available_steps"] == {"count": 3, "first": 1, "last": 9, "steps": [1, 5, 9]}
+    assert d["parts"] == ["Core", "Magnet", "Air_4"] and d["element_part"] == [0, 0, 2, 2] and d["warnings"]
+    with pytest.raises(F.FieldDataError, match="step 4 is not stored") as e:
+        F.export(None, "x.jplot", p, 4, ["B"])
+    assert "3 from 1 to 9" in e.value.hint
+
+
+def test_probe_many_locates_once(tmp_path, monkeypatch):
+    d = data(tmp_path)
+    calls = []
+    real = F.locate
+    monkeypatch.setattr(F, "locate", lambda *a, **k: calls.append(1) or real(*a, **k))
+    out = F.probe_many(d, ["B", "Br", "Bt", "Az"], [[250.0, 500.0], [900.0, 100.0]], center=(500.0, 500.0))
+    assert len(calls) == 1 and set(out) == {"B", "Br", "Bt", "Az"}
+    assert out["B"]["values"] == F.probe(d, "B", [[250.0, 500.0], [900.0, 100.0]])["values"]
+
+
+def test_visible_parts_explicit_and_unknown(tmp_path):
+    d = data(tmp_path)
+    d["part_materials"] = ["35JN210", "Air", "Air"]
+    assert server._visible_parts(d, None, True) == ["Core"]
+    assert server._visible_parts(d, ["Magnet"], True) == ["Magnet"]       # explicit parts beat hide_air
+    assert server._visible_parts(d, None, False) is None
+    with pytest.raises(ValueError, match=r"parts \['Rotor'\] not in the field data.*'Core', 'Magnet'"):
+        server._visible_parts(d, ["Rotor"], True)
+
+
+def test_field_plot_unknown_part_and_explicit_air(fake, tmp_path):
+    pytest.importorskip("matplotlib")
+    bad = json.loads(asyncio.run(server.jmag_field_plot("Load", parts=["Rotor"], out=str(tmp_path / "x.png")))[0])
+    assert not bad["ok"] and "Core" in bad["error"]["message"]
+
+
+def test_field_json_written_once_and_after_render(fake, tmp_path, monkeypatch):
+    pytest.importorskip("matplotlib")
+    saved = []
+    real = F.save
+    monkeypatch.setattr(F, "save", lambda d, p: saved.append(p) or real(d, p))
+    monkeypatch.setattr(server, "state_dir", lambda: tmp_path)
+    a = json.loads(asyncio.run(server.jmag_field_plot("Load", out=str(tmp_path / "a.png")))[0])["result"]
+    b = json.loads(asyncio.run(server.jmag_field_plot("Load", out=str(tmp_path / "b.png")))[0])["result"]
+    assert len(saved) == 1 and a["data_path"] == b["data_path"]
+    bad = json.loads(asyncio.run(server.jmag_field_plot("Load", quantity="Bogus", out=str(tmp_path / "c.png")))[0])
+    assert not bad["ok"] and len(saved) == 1                                 # nothing written for a failed plot
+
+
+def test_render_errors_become_envelopes(fake, tmp_path, monkeypatch):
+    def boom(*a, **k):
+        raise AttributeError("'TriContourSet' object has no attribute 'set_path_effects'")
+    monkeypatch.setattr(server.plotting, "field", boom)
+    env = json.loads(asyncio.run(server.jmag_field_plot("Load", out=str(tmp_path / "x.png")))[0])
+    assert not env["ok"] and "matplotlib >= 3.8" in env["error"]["hint"]
+
+
+def test_derive_b_from_linear_az_is_exact(tmp_path):
+    mesh = F.read_mesh_jcf(jcf(tmp_path))
+    v = values()                                          # Az = 2x + 3y + 1 (m) -> B = (dAz/dy, -dAz/dx) = (3, -2)
+    ids, b = F.derive_b(mesh, v["Az"][1], v["Az"][2])
+    assert ids.tolist() == [7, 8, 9] and np.allclose(b[:, 0], 3.0) and np.allclose(b[:, 1], -2.0)   # quad too
+
+
+class FakeJplotNoB(FakeJplot):
+    def component(self, step, key):
+        return None if key == 16001 else super().component(step, key)
+
+
+def test_export_derives_b_when_the_file_has_none(tmp_path, monkeypatch):
+    monkeypatch.setattr(F, "JplotFile", FakeJplotNoB)
+    d = F.export(None, "x.jplot", str(jcf(tmp_path)), 5, ["B", "Bx"])
+    assert d["values"]["B"] == pytest.approx([math.hypot(3, 2)] * 4) and d["values"]["Bx"] == pytest.approx([3.0] * 4)
+    assert "curl of Az" in d["quantities"]["B"]["source"] and d["available_steps"]["count"] == 3

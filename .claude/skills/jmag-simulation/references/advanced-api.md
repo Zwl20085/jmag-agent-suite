@@ -173,7 +173,8 @@ live JMAG, not guessed.
 ## Field export and magnet materials (measured 2026-11-03, 23.0.01zv, 12s/4p SPM Transient2D, 129 steps)
 
 - `study.GetResultFileName()` -> `<case folder>/Designer.jplot` (no error log). The same folder holds
-  `Designer_input.jcf`, written by every run. `study.WriteMeshJcf(path)` returned None and wrote the same
+  `Designer_input.jcf` after the first run of a new project; after later runs that file is absent and
+  `Designer.jcf` holds the `mesh.bin` (same ids as the jplot). `study.WriteMeshJcf(path)` returned None and wrote the same
   mesh in 0.28 s, but numbers JMAG's air regions differently from the jplot (an extra part id 22), so
   `field_export` uses the run's file and calls `WriteMeshJcf` only when it is missing.
 - `JplotReader.dll` (install root) loads in the bridge's 64-bit Python with `os.add_dll_directory(<JMAG>)`;
