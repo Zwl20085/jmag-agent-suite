@@ -74,3 +74,92 @@ def check_loss(loss: dict | None) -> dict | None:
     if any(not math.isfinite(v) or v < 0 for v in vals.values()):
         raise MaterialInputError(f"loss coefficients must be finite and >= 0, got {vals}", "check signs and units")
     return vals
+
+
+#: Typical reversible Br temperature coefficients [1/K] from magnet datasheets (cited as typical values only;
+#: use the grade's own datasheet): sintered NdFeB about -0.0012, SmCo about -0.0003, AlNiCo about -0.0002.
+TYPICAL_BR_TEMP_COEFF = {"NdFeB": -0.0012, "SmCo": -0.0003, "AlNiCo": -0.0002}
+BR_RANGE = (0.0, 1.6)       # T, exclusive / inclusive: no commercial magnet exceeds ~1.5 T
+MU_R_RANGE = (1.0, 1.3)     # recoil permeability of permanent magnets (ferrite ~1.05-1.2, NdFeB ~1.03-1.1)
+
+
+def check_magnet(br: float | None = None, mu_r: float | None = None, temperature: float | None = None,
+                 br_temp_coeff: float | None = None, bh: Sequence[Sequence[float]] | None = None) -> dict:
+    """Validate a permanent-magnet material for jmag_create_material(kind="magnet").
+
+    Linear: br [T] at 20 degC and mu_r (recoil, 1..1.3); optional temperature [degC] with br_temp_coeff [1/K]
+    gives the applied Br(T) = br * (1 + coeff * (T - 20)). Nonlinear: bh = demagnetisation curve [[H A/m, B T],
+    ...], H and B strictly increasing (H may be negative), B(H=0) = Br in (0, 1.6] T.
+    Returns {"kind": "linear", "br", "br_20", "mu_r", "temperature", "br_temp_coeff", "warnings"} or
+    {"kind": "nonlinear", "table", "br", "hcb", "warnings"}.
+    """
+    warnings: list[str] = []
+    if bh is not None:
+        if br is not None or mu_r is not None or temperature is not None or br_temp_coeff is not None:
+            raise MaterialInputError("give either bh (nonlinear demagnetisation curve) or br/mu_r (linear), not both",
+                                     "temperature scaling is only offered for the linear model; scale the table yourself")
+        try:
+            rows = [(float(r[0]), float(r[1])) for r in bh]
+        except (TypeError, ValueError, IndexError):
+            raise MaterialInputError("bh must be a list of [H, B] pairs (A/m, T)",
+                                     "example: [[-900000, 0], [-800000, 0.2], [0, 1.2], [100000, 1.33]]") from None
+        if any(not (math.isfinite(h) and math.isfinite(b)) for h, b in rows):
+            raise MaterialInputError("bh contains NaN or infinite values", "send finite numbers only")
+        if len(rows) < 3:
+            raise MaterialInputError(f"bh has {len(rows)} points; need at least 3", "send the demagnetisation curve")
+        for (h0, b0), (h1, b1) in zip(rows, rows[1:]):
+            if not (h1 > h0 and b1 > b0):
+                raise MaterialInputError(f"H and B must both increase strictly; ({h0}, {b0}) -> ({h1}, {b1})",
+                                         "sort the demagnetisation curve by H (most negative first)")
+        if rows[0][0] >= 0 or rows[-1][0] < 0:
+            raise MaterialInputError("the demagnetisation curve must span H = 0 (start at negative H, end at H >= 0)",
+                                     "second quadrant: H from about -Hcb to 0 A/m, B from about 0 to Br")
+        br_t = _interp_zero(rows)
+        if not (BR_RANGE[0] < br_t <= BR_RANGE[1]):
+            raise MaterialInputError(f"B at H = 0 (Br) is {br_t:.4g} T, outside (0, 1.6] T", "check units (T, A/m)")
+        hcb = _h_at_b0(rows)
+        if hcb is None:
+            warnings.append("curve does not reach B = 0; JMAG extrapolates below the first point")
+        return {"kind": "nonlinear", "table": [[h, b] for h, b in rows], "br": br_t, "hcb": hcb, "warnings": warnings}
+    if br is None or mu_r is None:
+        raise MaterialInputError("a linear magnet needs br (T) and mu_r", "e.g. br=1.2, mu_r=1.05 (generic NdFeB)")
+    try:
+        br, mu_r = float(br), float(mu_r)
+    except (TypeError, ValueError):
+        raise MaterialInputError("br and mu_r must be numbers", "br in T, mu_r dimensionless") from None
+    if not (BR_RANGE[0] < br <= BR_RANGE[1]):
+        raise MaterialInputError(f"br = {br} T outside (0, 1.6] T", "Br of commercial magnets is 0.2-1.5 T")
+    if not (MU_R_RANGE[0] <= mu_r <= MU_R_RANGE[1]):
+        raise MaterialInputError(f"mu_r = {mu_r} outside [1, 1.3]", "recoil permeability of PMs is 1.0-1.3")
+    br_app = br
+    if temperature is not None:
+        if br_temp_coeff is None:
+            raise MaterialInputError("temperature needs br_temp_coeff (1/K)",
+                                     f"typical datasheet values: {TYPICAL_BR_TEMP_COEFF}")
+        t, a = float(temperature), float(br_temp_coeff)
+        if not (math.isfinite(t) and math.isfinite(a)) or abs(a) > 0.01:
+            raise MaterialInputError(f"br_temp_coeff = {a} 1/K is implausible", "use about -0.0012 (NdFeB)")
+        if t < -60 or t > 250:
+            warnings.append(f"temperature {t} degC is outside the usual -60..250 degC; the linear Br(T) law and the "
+                            f"magnet's irreversible-demagnetisation limit are not checked here")
+        br_app = br * (1.0 + a * (t - 20.0))
+        if not (BR_RANGE[0] < br_app <= BR_RANGE[1]):
+            raise MaterialInputError(f"Br at {t} degC would be {br_app:.4g} T", "check temperature and coefficient")
+    elif br_temp_coeff is not None:
+        warnings.append("br_temp_coeff ignored without temperature")
+    return {"kind": "linear", "br": br_app, "br_20": br, "mu_r": mu_r, "temperature": temperature,
+            "br_temp_coeff": br_temp_coeff, "warnings": warnings}
+
+
+def _interp_zero(rows: list[tuple[float, float]]) -> float:
+    for (h0, b0), (h1, b1) in zip(rows, rows[1:]):
+        if h0 <= 0.0 <= h1:
+            return b0 + (b1 - b0) * (0.0 - h0) / (h1 - h0)
+    return rows[-1][1]
+
+
+def _h_at_b0(rows: list[tuple[float, float]]) -> float | None:
+    for (h0, b0), (h1, b1) in zip(rows, rows[1:]):
+        if b0 <= 0.0 <= b1:
+            return h0 + (h1 - h0) * (0.0 - b0) / (b1 - b0)
+    return None

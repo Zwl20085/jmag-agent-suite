@@ -29,6 +29,9 @@ live JMAG, not guessed.
 | `jmag_optimization_table` set | `optimization_set` | UNVERIFIED |
 | `jmag_experiment` `back_emf`, `cogging`, `load_point` | `experiment_setup` + run + get_result | VERIFIED |
 | `jmag_experiment` `inductance_static` (L and Ld/Lq) | set_properties + run + get_result | VERIFIED |
+| `jmag_field_data` / `jmag_field_plot` / `jmag_field_probe` (2D) | `field_export` + server-side `fielddata` | VERIFIED (Transient2D with rotation; `case=` UNVERIFIED) |
+| `jmag_create_material` kind `magnet`, linear | `create_material` | VERIFIED (read-back) |
+| `jmag_create_material` kind `magnet`, nonlinear `bh` | `create_material` | table read-back VERIFIED, solver use UNVERIFIED |
 
 ## Capabilities
 
@@ -166,3 +169,26 @@ live JMAG, not guessed.
   psi_pm,d = 0.0550 Wb with psi_pm,q ~ 1.6e-6 Wb; Ld = 0.367 mH, Lq = 0.366 mH (SPM: saliency 1.00);
   phase-U self inductance (magnet flux removed) 0.286 mH. With -90 deg the sign of psi_pm,d flips
   (the tool now warns).
+
+## Field export and magnet materials (measured 2026-11-03, 23.0.01zv, 12s/4p SPM Transient2D, 129 steps)
+
+- `study.GetResultFileName()` -> `<case folder>/Designer.jplot` (no error log). The same folder holds
+  `Designer_input.jcf` after the first run of a new project; after later runs that file is absent and
+  `Designer.jcf` holds the `mesh.bin` (same ids as the jplot). `study.WriteMeshJcf(path)` returned None and wrote the same
+  mesh in 0.28 s, but numbers JMAG's air regions differently from the jplot (an extra part id 22), so
+  `field_export` uses the run's file and calls `WriteMeshJcf` only when it is missing.
+- `JplotReader.dll` (install root) loads in the bridge's 64-bit Python with `os.add_dll_directory(<JMAG>)`;
+  steps 1..N (0 and N+1 give a NULL reader); coordinates in metres; part titles `Name@Material`; JMAG's
+  generated air regions have an empty title. Keys present in this study: element 16001 (B, 3 components),
+  16503 (J, conductors only), 16505 (magnetisation vector, iron + magnets), 16521 (differential mu_r),
+  170002 (permeance factor, magnets), 7501; node 11005 (A, z component), 11501 (nodal force), 10001
+  (displacement). No 16550 (magnetisation ratio) without the matching output setting.
+- Rotor motion: `jplotCountNodalDisplacements(step)` lists the 5031 moving nodes with their displacement
+  from step 1; no element mixes moving and fixed nodes (the slide interface is non-conforming), so
+  node + displacement gives the geometry of the step.
+- Material Editor (`lib.GetUserMaterial(name)`) magnets: `MagneticPropertyType` 1 (Magnet),
+  `MagnetPermeabilityType` 6 (MagnetLinearBr) with `ResidualMagneticFluxDensity` [T] and
+  `MagnetPermeability`, or 1 (NonLinearReversible) with `SetTable("BhTable", [[H, B], ...])` (negative H
+  accepted, read back row-for-row); `IsMagnet()` True afterwards. `GetPropertyNames()` of that object does
+  not list these names (it lists the study-material names), so it cannot validate them. The 23.0
+  Material-Editor page has no scalar `RecoilPermeability`, only `RecoilPermeabilityTable`.

@@ -158,3 +158,49 @@ Details: `jmag-experiments` -> `references/pmsm.md` section 2c; `static-3d.md` s
   two end faces lie on `SymmetryBoundary` planes: one secondary face selected, run OK. 721 k elements: 27 s mesh,
   43 s solve. Load torque 0.2-0.6 %.
 
+## Field results outside JMAG (measured 2026-11-03, JMAG-Designer 23.0.01zv, 12s/4p SPM Transient2D)
+
+- Result file: `study.GetResultFileName()` = `<case folder>/Designer.jplot` (317 MB for 129 steps, 27 379
+  elements). `JplotReader.dll` in the install root reads it from any 64-bit Python via ctypes (header and sample
+  in `Tools/JPlotReader`): open 0.01 s, nodes 0.02 s, element centres 0.06 s, one component at one step 0.02 s.
+- Steps are 1-based (1..129 here; step 0 and 130 give no reader). Coordinates are in metres (stator outer
+  element centre 59.5 mm for a 60 mm stator) while the model unit is mm.
+- Element types: 2 = triangle (26 611), 3 = quadrilateral (768, the one-element air-gap layer of the slide
+  mesh). Part ids are 1-based; titles `Name@Material`; JMAG's own air regions have an empty title (here id 20
+  = rotor-side air incl. the quad layer, r 27.4-30.5 mm; id 21 = stator-side gap + outer air, r 30.8-146.5 mm);
+  a suppressed part keeps its title but has no elements.
+- The jplot has no connectivity. The first run of a new project left `Designer_input.jcf` next to it; three later
+  runs (duplicated studies, 2026-11-03) left none, but their `Designer.jcf` held the same `mesh.bin` with the jplot's
+  part ids (after the first run `Designer.jcf` held only an empty `mesh.dat`; `mesh_cache_post.jcf` uses another
+  layout). Each is a ZIP whose `mesh.bin` is a
+  6-byte prefix + raw deflate of a 64-byte header (`b"MJ\0\0"`, int32 1, node count, element count, ...),
+  nodes `(int32 id, 3 x float64)` and elements `(int32 id, int32 type, int32 1, int32 part id, 3 or 4 node
+  ids)`, all counter-clockwise. Node ids and coordinates (to 5e-13 m), element ids, types and part ids equal
+  the jplot's; centroids from this connectivity equal the jplot element centres exactly, areas to 7e-12.
+  `study.WriteMeshJcf(path)` writes the same layout (0.28 s) but splits the air region into another part id.
+  The format is undocumented: a future JMAG may change it (the parser checks header, sizes and types).
+- `JplotToTecplot.exe` (install root) needs the `InsDir` environment variable and a parameter file, writes
+  binary `.szplt` (Tecplot SZL) and is licence-checked: not usable as a text route.
+- Element B (key 16001): max |B| 2.20356086364409 T at step 129 = `ContourMaxValue` of the |B| contour at the
+  same step to all digits; same at step 40 (2.223028964979652, min 0.001725 also equal with the air regions
+  left out). Nodal A (key 11005) has only a z component in 2D. J (16503) is defined on the 3530 coil
+  elements only and equals N I / A of the coil side (40 turns, 10 A, two slots of 139.19 mm^2 ->
+  1.4368e6 A/m^2).
+- Moving rotor: nodal displacement (from the step-1 position) is listed for the 5031 rotor-side nodes at
+  every step (all zero at step 1); no element mixes moving and fixed nodes, so node + displacement gives the
+  geometry at that step (no inverted triangle at steps 2, 40, 129; total area unchanged).
+- Air-gap probe at r = 30.5 mm, step 129, 720 points (element values): Br fundamental 0.954 T (order 2), THD
+  37 % (3rd 0.23 T, 7th 0.22 T); interpolated nodal averages give 0.964 T, THD 37.3 %.
+- Material Editor magnets: `MagneticPropertyType` 1, `MagnetPermeabilityType` 6 + `ResidualMagneticFluxDensity`
+  + `MagnetPermeability` read back exactly (1.2 T / 1.056 T at 20 / 120 degC with -0.0012 1/K, mu_r 1.05);
+  `MagnetPermeabilityType` 1 + `BhTable` with negative H read back row-for-row; `IsMagnet()` True. Solving with
+  the nonlinear table was not tried.
+- Element B (key 16001) was in the jplot of the project's first run only. Three later runs (plain duplicate of the
+  study; duplicates with `OutputTimingMode` 1 / `OutputStartStep` 65, `OutputTimingSameStep` 0, and with
+  `OutputResultsTimingMode` 1 / `OutputResultsStartStep` 65) stored no 16001 at any step (jplot 219 MB vs 318 MB);
+  cause not isolated. Nodal A (11005), J, magnetisation, permeance factor were stored at all 129 steps in every case,
+  so neither output setting thinned the jplot (subsampled steps not reproduced). B as the curl of A per element
+  equals the stored 16001 to 1e-8 T on triangles and 2e-14 T on the slide-layer quads (bilinear gradient at the
+  centre), and its max equals `ContourMaxValue` at steps 65, 100, 129 (2.2035617, 2.2313241, 2.2035609 T).
+- `study.WriteMeshJcf` mesh of the first run: 1713 elements carry part id 22 where the jplot has 20 (same element
+  ids, types and centres); taking the part ids from the jplot gives the same parts and max |B| as the run's file.

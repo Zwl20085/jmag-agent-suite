@@ -67,3 +67,27 @@ def test_bad_inputs(tmp_path):
         plotting.plot("waveform", {"x": [0, 1, 2], "series": {"a": [1, 2]}}, str(tmp_path / "x.png"))
     with pytest.raises(ValueError, match="not found"):
         plotting.plot("waveform", {"x": [0, 1], "series": {"a": [1, 2]}}, str(tmp_path / "x.png"), y=["b"])
+
+
+def test_style_does_not_leak_and_series_never_cycle(tmp_path):
+    import matplotlib
+    before = dict(matplotlib.rcParams)
+    t, y = _sine()
+    series = {f"s{k}": [v + k for v in y] for k in range(10)}       # > 8 series: the tail is grey, not cycled
+    r = plotting.plot("waveform", {"x": t, "series": series}, str(tmp_path / "many.png"))
+    assert _png(r["path"]) and set(r["annotations"]) == set(series)
+    assert plotting._color(7) == plotting.SERIES_COLORS[7] and plotting._color(8) == plotting.OTHER_COLOR
+    r = plotting.plot("fft", {"x": t, "series": {"a": y, "b": [2 * v for v in y]}}, str(tmp_path / "f2.png"),
+                      electrical_frequency_hz=50)
+    assert r["annotations"]["b"]["fundamental"] == pytest.approx(2.0, rel=1e-6)
+    after = dict(matplotlib.rcParams)
+    assert {k for k in before if before[k] != after.get(k)} <= {"backend"}
+
+
+def test_torque_speed_with_power_series(tmp_path):
+    sp = [0, 1000, 2000, 3000]
+    r = plotting.plot("torque_speed", {"x": sp, "series": {"torque": [10, 10, 9, 6], "power": [0, 900, 1800, 1500]}},
+                      str(tmp_path / "ts.png"))
+    a = r["annotations"]
+    assert a["max_power_W"] == 1800 and a["speed_at_max_power_rpm"] == 2000 and a["base_speed_rpm"] == 1000
+    assert set(a) == {"max_torque_Nm", "base_speed_rpm", "max_power_W", "speed_at_max_power_rpm", "max_speed_rpm"}

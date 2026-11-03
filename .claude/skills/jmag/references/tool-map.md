@@ -50,7 +50,7 @@ Tools marked (new) were added with the skill family; read their description befo
 
 ## Materials
 - `jmag_find_materials(query?, limit?)` - search the material library.
-- `jmag_create_material(name, bh, density?, conductivity?, loss?, overwrite?)` - custom soft-magnetic B-H material, verified.
+- `jmag_create_material(name, bh?, density?, conductivity?, loss?, overwrite?, kind?, br?, mu_r?, temperature?, br_temp_coeff?)` - custom soft-magnetic B-H material (kind `steel`, verified) or permanent magnet (kind `magnet`: linear Br + mu_r with optional Br(T) scaling, verified; or a demagnetisation `bh` curve, read-back verified, solver use unverified).
 - `jmag_set_material(study, parts, material, properties?, orientation?)` - assign material and magnet orientation.
 
 ## Excitation and conditions
@@ -100,9 +100,12 @@ Tools marked (new) were added with the skill family; read their description befo
 - `jmag_export_table(study, path, kind?, ...)` (new) - JMAG's own writers: all tables, all cases, one table, field tables (save first: a field-export sequence crashed Designer once).
 - `jmag_case_report(study, path, case?)` (new) - JMAG's own case report (`WriteCaseReport`); save the project first.
 - `jmag_contour_image(study, result_type?, component?, step?, path?)` - contour PNG with min/max.
+- `jmag_field_data(study, step?, quantities?, out?, case?, per_part?)` (new, 2D) - the field at one step as a JSON file (nodes, triangles, parts, B/Bx/By/Az/J ...) read from the result file outside JMAG, plus per-part max/min/mean; verified against `jmag_contour_image`.
+- `jmag_field_plot(study | data_path, step?, quantity?, flux_lines?, parts?, hide_air?, smooth?, kind?, cmap?, vmin?, vmax?, dpi?)` (new, 2D) - the bridge's own field plot (|B| + flux lines + part outlines, or the mesh) with the drawn numbers; air hidden by default (`hide_air=False` = full domain).
+- `jmag_field_probe(study | data_path, circle | segment, quantity?, pole_pairs?, method?)` (new, 2D) - values along a circle or segment (air-gap Br/Bt waveform) with harmonics and a PNG.
 - `jmag_physics_check(study, check, ...)` - `kvl` | `energy` | `power_balance` invariants.
 - `jmag_compare(study_a, study_b, tables?, threshold_pct?)` (new) - setup differences that could explain a change, plus result statistics side by side with % deltas.
-- `jmag_plot(kind, data | csv_path | study+table, ...)` (new) - `waveform` | `fft` | `sweep` | `map` | `torque_speed` PNG plus the plotted numbers in text (needs the `plots` extra / matplotlib).
+- `jmag_plot(kind, data | csv_path | study+table, ...)` (new) - `waveform` | `fft` | `sweep` | `map` | `torque_speed` PNG plus the plotted numbers in text (needs the `plots` extra / matplotlib); field and mesh plots go through `jmag_field_plot`.
 - `jmag_make_report(title, studies, out_dir, ...)` (new) - Markdown folder (setup, every finding, convergence, statistics with sources, images, invariants you pass in, sweeps, doubts, replay script).
 
 ## Knowledge and escape hatch

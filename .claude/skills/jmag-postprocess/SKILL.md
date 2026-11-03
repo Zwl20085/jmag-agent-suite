@@ -54,6 +54,33 @@ the study, the table, the column, the time window and the check that supports it
   refinement; judge saturation by the area-averaged B in the tooth/yoke body.
 - Pick the step deliberately (peak current, max torque); state it.
 
+## Fields outside JMAG (2D studies)
+
+Three tools read the solved study's own result file (Designer.jplot through JMAG's JplotReader.dll) and the
+run's mesh, so the bridge draws and measures fields itself - no contour definitions, about 1 s per call:
+
+- `jmag_field_data(study, step=None, quantities=['B', 'Az'])` writes the field as JSON (mm, triangles,
+  per-element B, nodal Az, part names; JMAG's air regions are `Air_<id>`) and returns per-part
+  max / min / area-weighted mean for B and J (`per_part=[...]` for others). Use it for numbers: mean tooth / yoke B, magnet working
+  B, J in the slots (`J`). The arrays stay in the file.
+- `jmag_field_plot(study, step=None, quantity='B')` is the field figure for reports: perceptual
+  colour map, flux lines (Az contours), part outlines, scale bar; `kind='mesh'` shows the mesh. Air
+  regions are hidden by default and the view zooms to the rest (`hide_air=False` = full domain). B is
+  shaded smoothly (nodal averages per part) while max/mean/marker stay the element values;
+  `smooth=False` shows the raw per-element values. `parts=[...]` zooms to parts, `vmin`/`vmax` put several runs on one scale. Re-plot a saved
+  JSON without JMAG with `data_path=`.
+- `jmag_field_probe(study, quantity='Br', circle={'r': <mid-gap mm>, 'n': 720}, pole_pairs=p)` is the
+  air-gap flux-density waveform with its harmonics (fundamental = order p, THD over k >= 2, non-multiple
+  orders flagged). `quantity='B'` also returns Br and Bt; |B| itself gets no spectrum (rectified).
+  `segment={'from': [x, y], 'to': [x, y]}` gives B along a tooth or across the yoke.
+
+Prefer them over `jmag_contour_image` for report figures and for anything you want as numbers; keep
+`jmag_contour_image` for 3D and axisymmetric models (refused by the field tools) and when the user wants
+JMAG's own picture. Both report the same max |B| (verified). Like any contour, the max sits at re-entrant
+corners: read saturation from the per-part mean and the probe, not from the max.
+MagnetizationRatio / DemagnetizationRatio are only in the result file when the study outputs them (not
+verified yet); `quantities=['key:<id>:element:0']` reads any jplot key (KeyList.xml in the JMAG install).
+
 ## Plots, exports, comparisons
 
 - `jmag_plot(kind, ...)`: `waveform` (mean/rms annotated) | `fft` (one period; pass
@@ -71,7 +98,7 @@ the study, the table, the column, the time window and the check that supports it
 - `jmag_case_report(study, path, case?)`: JMAG's own HTML case report (same save-first rule).
 - `jmag_compare(study_a, study_b)`: metric deltas plus setup differences that could explain them;
   use it for mesh studies, variants and before/after fixes.
-- `jmag_contour_image` / `jmag_circuit_image` / `jmag_model_image` produce PNGs for the report.
+- `jmag_field_plot` / `jmag_contour_image` / `jmag_circuit_image` / `jmag_model_image` produce PNGs for the report.
 - `jmag_journal(export_script=...)` writes a replayable script of every state change - attach
   it for traceability.
 
