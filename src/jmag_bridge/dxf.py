@@ -1,4 +1,4 @@
-"""Tiny dependency-free DXF (R12) writer for 2D geometry handed to JMAG.
+"""Tiny dependency-free DXF (R12) writer for 2D geometry handed to JMAG (and `inspect` to read one back).
 
 JMAG's Geometry Editor turns every closed loop into a region, so draw each
 part as a closed outline. Shared edges between neighbouring parts are fine
@@ -94,3 +94,10 @@ def c_core_inductor(path: str) -> dict:
     d.save(path)
     return {"core_point": [5.0, 30.0], "coil_in_point": [20.0, 30.0], "coil_out_point": [-5.0, 30.0],
             "leg_width_mm": 15.0, "gap_mm": 1.0, "core_area_mm2": 2685.0, "coil_area_mm2": 208.0}
+
+
+def inspect(path: str) -> dict:
+    """Read a DXF back: the regions JMAG's import will create, role guesses and a draft labels JSON
+    (see ``dxf_inspect``)."""
+    from .dxf_inspect import inspect as _inspect
+    return _inspect(path)

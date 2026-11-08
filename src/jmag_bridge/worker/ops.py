@@ -38,11 +38,18 @@ def op(read_only=False):
     return deco
 
 
+#: Hint of an OpError raised without one: hints are the agent's next action, never empty.
+DEFAULT_HINT = "see jmag_messages; the tool docstring lists the preconditions"
+NO_RESULTS_HINT = "jmag_run then jmag_check(stage='post')"
+NO_CIRCUIT_HINT = "jmag_circuit_quick(...) first (circuits need a Transient or Frequency study)"
+READBACK_HINT = "jmag_get_properties to see what JMAG kept"
+
+
 class OpError(Exception):
     def __init__(self, message, hint=None, data=None):
         Exception.__init__(self, message)
         self.message = message
-        self.hint = hint
+        self.hint = hint or DEFAULT_HINT
         self.data = data
 
 
@@ -248,11 +255,14 @@ class Context(object):
                 resp["error"]["data"] = jsonable(e.data)
         except TypeError as e:
             resp["ok"] = False
+            first = (fn.__doc__ or "").strip().split("\n")[0]
             resp["error"] = {"type": "BadArguments", "message": str(e),
-                             "hint": (fn.__doc__ or "").strip().split("\n")[0]}
+                             "hint": "check the arguments against the jmag_* tool's description (parameter names "
+                                     "and types)" + (" - op %r: %s" % (name, first) if first else "")}
         except Exception as e:
             resp["ok"] = False
-            resp["error"] = {"type": type(e).__name__, "message": str(e), "trace": traceback.format_exc()[-1500:]}
+            resp["error"] = {"type": type(e).__name__, "message": str(e), "hint": DEFAULT_HINT,
+                             "trace": traceback.format_exc()[-1500:]}
             if self.pid and not pid_alive(self.pid):
                 resp["error"] = {"type": "JmagCrashed",
                                  "message": "JMAG-Designer (pid %s) is no longer running - it crashed or was closed during '%s'"
@@ -271,7 +281,7 @@ class Context(object):
                     resp["ok"] = False
                     resp["error"] = {"type": "JmagError",
                                      "message": "JMAG reported an error during this operation: %s" % (new[-1] if new else "?"),
-                                     "hint": "partial result attached; inspect jmag.messages"}
+                                     "hint": "partial result attached; inspect jmag_messages"}
             except Exception:
                 pass
         return resp
@@ -556,7 +566,7 @@ def import_dxf(ctx, path, model_name=None, create_regions=True):
     before = app.NumModels()
     geom = app.CreateGeometryEditor(False)
     if geom is None:
-        raise OpError("could not start Geometry Editor")
+        raise OpError("could not start Geometry Editor", "jmag_dialogs; a modal dialog may be open")
     try:
         geom.SetFileSaveConfirmation(False)
     except Exception:
@@ -652,7 +662,8 @@ def create_study(ctx, study_type, name, model=None):
                       "available: %s" % types)
     existing = [m.GetStudy(i).GetName() for i in range(m.NumStudies())]
     if name in existing:
-        raise OpError("study %r already exists in model %r" % (name, m.GetName()))
+        raise OpError("study %r already exists in model %r" % (name, m.GetName()),
+                      "pass another name=... or jmag_delete_study(study=%r) first" % name)
     s = need(m.CreateStudy(study_type, name), "new study")
     return {"model": m.GetName(), "study": s.GetName(), "type": s.GetScriptTypeName(),
             "condition_types": list(s.GetConditionTypes() or [])}
@@ -671,6 +682,10 @@ def duplicate_study(ctx, study, new_name, model=None):
     """Copy a study with all its settings (results are not copied)."""
     s = ctx.study(study, model)
     m = ctx.model_of(s)
+    existing = [m.GetStudy(i).GetName() for i in range(m.NumStudies())]
+    if new_name in existing:  # checked by listing: GetStudy(<missing name>) would log a JMAG error
+        raise OpError("study %r already exists in model %r" % (new_name, m.GetName()),
+                      "pass another new_name=... or jmag_delete_study(study=%r) first" % new_name)
     m.DuplicateStudyName(s.GetName(), new_name, True)
     return {"study": need(m.GetStudy(new_name), "duplicated study").GetName()}
 
@@ -692,14 +707,15 @@ def _target(ctx, target):
     if kind in ("condition", "subcondition"):
         c = _find_condition(s, target["name"])
         if c is None:
-            raise OpError("condition %r not found" % target["name"],
-                          "conditions: %s" % [s.GetCondition(i).GetName() for i in range(s.NumConditions())])
+            names = [s.GetCondition(i).GetName() for i in range(s.NumConditions())]
+            raise OpError("condition %r not found; existing conditions: %s" % (target["name"], names),
+                          "use one of the listed names (jmag_list_conditions)")
         if kind == "subcondition":
             return need(c.GetSubCondition(int(target.get("index", 0))), "sub-condition %s" % target.get("index", 0))
         return c
     if kind == "component":
         if not s.HasCircuit():
-            raise OpError("study has no circuit")
+            raise OpError("study has no circuit", NO_CIRCUIT_HINT)
         c = s.GetCircuit().GetComponent(target["name"])
         return need(c, "circuit component %r" % target["name"])
     if kind == "material":
@@ -817,7 +833,7 @@ def set_material(ctx, study, parts, material, properties=None, orientation=None,
         got = s.GetMaterial(pn)
         gname = got.GetName() if got is not None and got.IsValid() else None
         if gname != material:
-            raise OpError("material readback for %r is %r, expected %r" % (pn, gname, material))
+            raise OpError("material readback for %r is %r, expected %r" % (pn, gname, material), READBACK_HINT)
         mat = got
         row = {"part": pn, "material": gname}
         if properties:
@@ -974,7 +990,7 @@ def suppress_parts(ctx, parts, suppress=True, study=None, model=None):
     state = dict((n, bool(target.IsPartSuppressed(n))) for n in names)
     bad = [n for n, v in state.items() if v != bool(suppress)]
     if bad:
-        raise OpError("suppression readback mismatch for %s" % bad)
+        raise OpError("suppression readback mismatch for %s" % bad, READBACK_HINT)
     return {"suppressed" if suppress else "restored": names, "scope": "study %s" % study if study else "model"}
 
 
@@ -1067,7 +1083,7 @@ def _fem_group(ctx, study, ctype, subtype, name, component, sides, comp_props, r
     c = need(s.CreateCondition(ctype, name), ctype)
     c.SetLink(component)
     if c.GetLink() != component:
-        raise OpError("link readback %r != %r" % (c.GetLink(), component))
+        raise OpError("link readback %r != %r" % (c.GetLink(), component), READBACK_HINT)
     dim = m.GetDimension()
     for k, side in enumerate(sides):
         auto = "%s%s%d" % (name, "+" if direction_flag(side.get("direction", "up")) == 0 else "-", k + 1)
@@ -1112,7 +1128,9 @@ def list_conditions(ctx, study, model=None):
 def delete_condition(ctx, study, name, model=None):
     s = ctx.study(study, model)
     if _find_condition(s, name) is None:
-        raise OpError("condition %r not found" % name)
+        names = [s.GetCondition(i).GetName() for i in range(s.NumConditions())]
+        raise OpError("condition %r not found; existing conditions: %s" % (name, names),
+                      "use one of the listed names (jmag_list_conditions)")
     s.DeleteCondition(name)
     return {"deleted": name}
 
@@ -1149,7 +1167,7 @@ def _get_circuit(s, create=True):
     if s.HasCircuit():
         return s.GetCircuit()
     if not create:
-        raise OpError("study has no circuit")
+        raise OpError("study has no circuit", NO_CIRCUIT_HINT)
     c = s.CreateCircuit()
     if c is None or not c.IsValid():
         hint = None
@@ -1297,7 +1315,7 @@ def circuit_summary(ctx, study, model=None):
 def circuit_image(ctx, study, path, width=1600, height=1000, model=None):
     s = ctx.study(study, model)
     if not s.HasCircuit():
-        raise OpError("study has no circuit")
+        raise OpError("study has no circuit", NO_CIRCUIT_HINT)
     path = os.path.abspath(path)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     s.GetCircuit().ExportImageWithSize(path, int(width), int(height))
@@ -1457,7 +1475,8 @@ def _need_result(s, case=None):
     has = s.CaseHasResult(_check_case(s, case)) if case is not None else s.HasResult()
     if not has:
         where = "case %s of study %r" % (case, s.GetName()) if case is not None else "study %r" % s.GetName()
-        raise OpError("%s has no results" % where, "run it first (jmag_run, or jmag_run_cases for design-table cases)")
+        raise OpError("%s has no results" % where, "run it first: jmag_run (or jmag_run_cases for design-table "
+                                                   "cases), then jmag_check(stage='post')")
 
 
 @op(read_only=True)
@@ -1529,7 +1548,7 @@ def export_results(ctx, study, out_dir, tables=None, model=None):
     """Write each result table to CSV (x + columns)."""
     s = ctx.study(study, model)
     if not s.HasResult():
-        raise OpError("study has no results")
+        raise OpError("study has no results", NO_RESULTS_HINT)
     out_dir = os.path.abspath(out_dir)
     os.makedirs(out_dir, exist_ok=True)
     _, rows = _tables(s)
@@ -1557,7 +1576,7 @@ def contour_image(ctx, study, path, result_type="MagneticFluxDensity", component
     app = ctx.need_app()
     s = ctx.study(study, model)
     if not s.HasResult():
-        raise OpError("study has no results")
+        raise OpError("study has no results", NO_RESULTS_HINT)
     m = ctx.model_of(s)
     for i in range(app.NumModels()):
         if app.GetModel(i).GetName() == m.GetName():

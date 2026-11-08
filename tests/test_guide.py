@@ -90,3 +90,14 @@ def test_guide_resources_when_supported():
     out = asyncio.run(server.mcp.read_resource("jmag://guide/jmag-simulation"))
     text = "".join(getattr(c, "content", getattr(c, "text", "")) for c in out)
     assert text == guide.read_skill("jmag-simulation")
+
+
+@pytest.mark.parametrize("ref", ["static-3d.md", "static-3d-basics.md", "static-3d-rotating.md",
+                                 "static-3d-nonlinear.md", "static-3d-rotating"])
+def test_split_3d_reference_resolves_with_and_without_topic(ref):
+    r = asyncio.run(server.jmag_guide(reference=ref))           # no topic: found in exactly one skill
+    assert r["ok"] and r["result"]["topic"] == "jmag-simulation", r
+    r = asyncio.run(server.jmag_guide(topic="jmag-simulation", reference=ref))
+    assert r["ok"] and len(r["result"]["text"]) > 200
+    if ref != "static-3d.md":
+        assert "static-3d.md" in guide.list_references("jmag-simulation")   # the old name stays as the index

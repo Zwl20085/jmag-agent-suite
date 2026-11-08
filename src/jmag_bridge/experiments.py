@@ -137,6 +137,13 @@ def dq_currents(amplitude: float, theta_e_deg: float, axis: str) -> tuple[float,
     return out[0], out[1], out[2]
 
 
+def dq_to_abc(d: float, q: float, theta_e_deg: float) -> tuple[float, float, float]:
+    """Inverse amplitude-invariant Park: x_k = d cos(theta - s_k) - q sin(theta - s_k), s = 0, +120, -120 deg."""
+    th = math.radians(theta_e_deg)
+    out = [d * math.cos(th - s) - q * math.sin(th - s) for s in (0.0, _TWO_THIRDS_PI, -_TWO_THIRDS_PI)]
+    return out[0], out[1], out[2]
+
+
 def park(abc: Sequence[float], theta_e_deg: float) -> tuple[float, float]:
     """Amplitude-invariant Park transform of phase quantities (a, b, c) -> (d, q)."""
     th = math.radians(theta_e_deg)
@@ -163,6 +170,24 @@ def ld_lq(psi_zero: Sequence[float], psi_d_test: Sequence[float], psi_q_test: Se
 KINDS = ("cogging", "back_emf", "load_point", "inductance_static")
 
 
+class ExperimentFailed(RuntimeError):
+    """The experiment's solve or setup failed: the server returns ok=false with this message, hint and data."""
+
+    def __init__(self, message: str, hint: str, data: dict | None = None) -> None:
+        super().__init__(message)
+        self.message = message
+        self.hint = hint
+        self.data = data or {}
+
+
+def _leftover_hint(target: str, duplicated: bool) -> str:
+    if not duplicated:
+        return ""
+    return (f" The duplicated study {target!r} is still in the project: fix the setup and re-run it with "
+            f"jmag_run({target!r}) then action='analyze' (params duplicate=false), or remove it with "
+            f"jmag_delete_study(study={target!r}).")
+
+
 def _need(params: dict, *names: str) -> None:
     missing = [n for n in names if params.get(n) is None]
     if missing:
@@ -172,7 +197,8 @@ def _need(params: dict, *names: str) -> None:
 def _ok(env: dict, what: str) -> dict:
     if not env.get("ok"):
         err = env.get("error") or {}
-        raise RuntimeError(f"{what}: {err.get('message')} | hint: {err.get('hint')}")
+        hint = err.get("hint")
+        raise RuntimeError(f"{what}: {err.get('message') or 'failed'}" + (f" | hint: {hint}" if hint else ""))
     return env.get("result") or {}
 
 
@@ -251,7 +277,16 @@ async def _prepare(call: Call, kind: str, study: str, params: dict, model: str |
     target = study
     if params.get("duplicate", True):
         target = params.get("new_study") or f"{study}_{kind}"
-        _ok(await call("duplicate_study", 300, study=study, new_name=target, model=model), "duplicate study")
+        env = await call("duplicate_study", 300, study=study, new_name=target, model=model)
+        if not env.get("ok"):
+            err = env.get("error") or {}
+            msg = str(err.get("message") or "duplicate_study failed")
+            if "already exists" in msg:
+                raise ExperimentFailed(
+                    f"study {target!r} already exists (left by an earlier jmag_experiment?)",
+                    f"pass params new_study='<another name>', or remove it with jmag_delete_study(study={target!r}), "
+                    f"or analyze it as it is with study={target!r}, params duplicate=false, action='analyze'")
+            raise ExperimentFailed(f"duplicate study: {msg}", str(err.get("hint") or "see jmag_messages"))
     setup = _ok(await call("experiment_setup", 300, study=target, zero_current=zero, current_peak=amp,
                            phase_u_deg=params.get("phase_u_deg"), frequency=f_e, rpm=rpm,
                            steps=plan["steps"], time_step=plan["time_step"], source=params.get("source"),
@@ -420,14 +455,36 @@ async def run_experiment(kind: str, study: str, params: dict, call: Call,
         _need(params, "slots")
     if action == "analyze":
         return await analyze(call, kind, study, params, model)
-    target, plan, setup = await _prepare(call, kind, study, params, model)
+    duplicated = bool(params.get("duplicate", True))
+    try:
+        target, plan, setup = await _prepare(call, kind, study, params, model)
+    except RuntimeError as e:
+        if isinstance(e, ExperimentFailed):
+            raise
+        target = (params.get("new_study") or f"{study}_{kind}") if duplicated else study
+        raise ExperimentFailed(str(e), "fix the study setup named above." + _leftover_hint(target, duplicated)) from e
     st = await solve(target, float(params.get("wait_seconds", 600)), plan["electrical_frequency_Hz"])
     out: dict[str, Any] = {"kind": kind, "study": target, "plan": plan, "setup": setup}
-    if st.get("state") == "finished":
+    state = st.get("state")
+    if st.get("ok") is False or state == "failed" or st.get("solver_aborted"):
+        err = st.get("error") or {}
+        data = {**out, "run": {k: st.get(k) for k in ("state", "solver_aborted", "elapsed_s", "run", "post",
+                                                     "solver_log_warnings") if k in st}}
+        if st.get("precheck"):
+            data["precheck"] = st["precheck"]
+            msg = f"the pre-run check of {target!r} failed: the solve was not started"
+        elif st.get("solver_aborted"):
+            msg = f"the solve of {target!r} aborted: {err.get('message')}"
+        else:
+            msg = f"the solve of {target!r} failed: {err.get('message') or 'no results'}"
+        hint = (str(err.get("hint") or "read precheck / run above") + "." + _leftover_hint(target, duplicated))
+        raise ExperimentFailed(msg, hint, data)
+    if state == "finished":
         out.update(await analyze(call, kind, target, params, model))
         out["run_health"] = ((st.get("post") or {}).get("health") or {}).get("verdict")
         return out
     out["run"] = {k: st.get(k) for k in ("state", "elapsed_s", "percent", "eta_s", "run", "error") if k in st}
-    out["next"] = (f"poll jmag_run_status; when finished call jmag_experiment(kind={kind!r}, study={target!r}, "
-                   f"params=<same params, duplicate=false>, action='analyze')")
+    if state == "running":
+        out["next"] = (f"poll jmag_run_status; when finished call jmag_experiment(kind={kind!r}, study={target!r}, "
+                       f"params=<same params, duplicate=false>, action='analyze')")
     return out

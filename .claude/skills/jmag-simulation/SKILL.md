@@ -25,14 +25,17 @@ numbers, whether the model is working **normally or abnormally**.
 ## The loop
 
 1. `jmag_status` -> `jmag_connect` (`launch_new=true` for a fresh, detached instance).
-2. `jmag_new_project(path)` (a saved project is required before DXF import) or `jmag_open_project`.
+2. `jmag_new_project(path)` (a saved project is required before DXF import) or `jmag_open_project(<copy>)`;
+   on an unfamiliar `.jproj` call `jmag_inventory` first (models, studies, conditions, results) and
+   `jmag_capabilities` for what this JMAG offers.
 3. Geometry: `jmag_import_dxf` / `jmag_import_cad` -> `jmag_rename_parts` from the labelled points
    -> `jmag_list_parts` (nothing unnamed) -> `jmag_model_image` if unsure.
 4. `jmag_create_study`. Static2D takes no circuit; circuits and FEM coils need Transient/Frequency.
    **3D Static** (STEP model, `Current` condition with an inflow face, half model with
-   `SymmetryBoundary`): follow `references/static-3d.md` step by step - verified on 23.0. Rotating
-   machines in 3D Static (magnets, slit coils with leads, nodal `Torque`, periodic sector, one case
-   per rotor angle): its section 8; nonlinear B-H steel in 3D Static: its section 9.
+   `SymmetryBoundary`): follow `references/static-3d-basics.md` step by step - verified on 23.0.
+   Rotating machines in 3D Static (magnets, slit coils with leads, nodal `Torque`, periodic sector,
+   one case per rotor angle): `references/static-3d-rotating.md`; nonlinear B-H steel and radial
+   machines: `references/static-3d-nonlinear.md` (index: `static-3d.md`).
 5. Physics: `jmag_set_material` (magnets with `orientation`), stack length
    `jmag_set_properties(kind='study', values={'ModelThickness': L_mm})`, excitation
    (static: `jmag_add_current`; transient: `jmag_circuit_quick` + `jmag_add_fem_coil`, or
@@ -76,7 +79,7 @@ Read `references/jmag-gotchas.md` before your first study in a session. The shor
 
 - Static2D refuses circuits; the `Current` condition is the static coil excitation.
 - 3D `Current` on a closed winding: `DirectionType` Vector gives zero current without an error;
-  use a half model + InflowFace (`references/static-3d.md`).
+  use a half model + InflowFace (`references/static-3d-basics.md`).
 - `ModelThickness` defaults to 1 mm in 2D - torque/flux/EMF scale with it.
 - Rotating machines need a slide mesh (`MeshType=1`, `AutoSlide=1`, `AutoDivision=0` plus your
   `CircumferentialDivision`) and nothing user-drawn may bridge rotor and stator: suppress a DXF

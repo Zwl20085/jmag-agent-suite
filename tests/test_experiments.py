@@ -5,6 +5,7 @@ import math
 import pytest
 
 from jmag_bridge import experiments as ex
+from jmag_bridge import experiments
 
 
 def test_cogging_period_and_step_plan():
@@ -221,3 +222,48 @@ def test_inductance_resets_currents_when_a_solve_fails():
         asyncio.run(ex.run_experiment("inductance_static", "St", {"current_peak": 10, "conditions": ["A"]}, call, None))
     assert _currents_after(log) == {"A": 0.0, "B": 0.0}
     assert all("model" not in x["target"] for o, x in log if o == "set_properties")
+
+
+# --------------------------------------------------------------------------- 0.4.0: failures are not swallowed
+
+def _orchestration(dup_env, solve_result):
+    import asyncio
+
+    async def call(op, timeout=600, **a):
+        if op == "duplicate_study":
+            return dup_env
+        if op == "experiment_setup":
+            return {"ok": True, "result": {}}
+        return {"ok": False, "error": {"message": f"{op} not faked"}}
+
+    async def solve(target, wait_s, f_e):
+        return solve_result
+
+    return lambda: asyncio.run(experiments.run_experiment("back_emf", "Base", {"poles": 4}, call, solve))
+
+
+def test_existing_duplicate_name_gives_actionable_error():
+    import pytest
+    run = _orchestration({"ok": False, "error": {"type": "OpError",
+                                                 "message": "study 'Base_back_emf' already exists in model 'M'"}}, {})
+    with pytest.raises(experiments.ExperimentFailed) as e:
+        run()
+    assert "new_study" in e.value.hint and "jmag_delete_study(study='Base_back_emf')" in e.value.hint
+
+
+def test_running_solve_gives_next_and_finished_failure_raises():
+    import pytest
+    out = _orchestration({"ok": True}, {"ok": True, "state": "running", "elapsed_s": 5})()
+    assert out["run"]["state"] == "running" and "action='analyze'" in out["next"]
+    out = _orchestration({"ok": True}, {"ok": True, "state": "unknown"})()
+    assert "next" not in out                       # only a running solve is worth polling
+    with pytest.raises(experiments.ExperimentFailed) as e:
+        _orchestration({"ok": True}, {"ok": False, "state": "finished", "solver_aborted": True,
+                                      "error": {"message": "the solver aborted: x", "hint": "h"}})()
+    assert "aborted" in e.value.message and "Base_back_emf" in e.value.hint
+
+
+def test_dq_to_abc_inverts_park():
+    for d, q, th in ((1.0, 0.0, 0.0), (-3.0, 4.0, 77.0)):
+        dd, qq = experiments.park(experiments.dq_to_abc(d, q, th), th)
+        assert abs(dd - d) < 1e-12 and abs(qq - q) < 1e-12

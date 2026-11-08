@@ -12,14 +12,17 @@ physics-invariant thresholds.
 `jmag_check` and the post-run check return `{"verdict", "counts", "findings": [{"level",
 "code", "message", "fix"}]}`. FAIL = at least one error; CHECK = warnings, no errors; PASS =
 only infos (or nothing). `jmag_run` refuses to start on a FAIL pre-check unless `force=true`.
+`jmag_check` also returns `result = {"stage", "passed", "verdict", "counts", "hint"}`: `ok` only says the check
+ran; `passed` is false on FAIL (true on PASS and CHECK) and `hint` lists the fixes of the error findings (of the
+warnings for CHECK).
 
 ## 2. Call-level error types (`error.type`)
 
 | Type | Meaning | Action |
 |---|---|---|
 | `JmagError` | JMAG logged an error while the op ran (message-log diff); partial result attached | read `jmag_messages`; treat the result as invalid |
-| `OpError` | the bridge refused or detected a failure (unknown name, missing part, read-back mismatch, no results) | follow `hint` (closest names listed) |
-| `BadArguments` | wrong/missing tool arguments | the hint repeats the op's first doc line |
+| `OpError` | the bridge refused or detected a failure (unknown name, missing part, read-back mismatch, no results) | follow `hint` (closest names listed; never empty: default "see jmag_messages; the tool docstring lists the preconditions") |
+| `BadArguments` | wrong/missing tool arguments | check them against the jmag_* tool's description; the hint also names the worker op and its first doc line |
 | `JmagCrashed` | the Designer process died during the call | `jmag_connect(launch_new=true)`, reopen the saved project, `jmag_cleanup` |
 | timeout (message "did not answer within ...") | worker got no answer; dialogs attached | `jmag_dialogs` / `jmag_screenshot`, close the dialog, `jmag_connect` (the worker was restarted) |
 | `mismatch: true` in `applied` | value read back differs from what was set | unit/range problem; `jmag_get_properties(with_help=true)` |
@@ -48,6 +51,8 @@ only infos (or nothing). `jmag_run` refuses to start on a FAIL pre-check unless 
 | COARSE_MESH | warning | mesh exists with < 500 elements | local sizes, refine, compare |
 | NO_MESH_YET | info | no mesh yet (made at run time) | fine; `jmag_mesh` to see it first |
 | CHECK_MAGNETIZATION | info | magnets present | verify with a B contour after the run |
+| STEP_CHECKS_SKIPPED | info | Transient study, no `electrical_frequency_hz` given and none derivable: COARSE_TIME_STEP and SHORT_SPAN were not checked | pass `electrical_frequency_hz` = poles/2 * rpm/60 (the fix names the study's rpm) |
+| FE_DERIVED | info | no `electrical_frequency_hz` given; derived (Transient studies only) from RotationMotion speed + a `poles` (even integer 2..120) / `p` (integer 1..60) study equation, or speed + a circuit source `Frequency` whose implied pole count is an even integer | check the named source; pass the frequency explicitly if it is wrong |
 
 ## 4. Post-run codes (`jmag_check(stage='post')`, included in finished `jmag_run_status`)
 
@@ -56,9 +61,11 @@ only infos (or nothing). `jmag_run` refuses to start on a FAIL pre-check unless 
 | NO_RESULT | error | the study has no results (failed or cancelled) |
 | STEPS_CHANGED | warning | result rows != configured steps (JMAG retimed motion, or the run stopped early) - use the returned time axis |
 | ITERATION_LIMIT | warning | steps where Newton hit `NonlinearMaxIteration` (listed) |
-| ZERO_CURRENT | error | every column of a circuit-current table is identically zero |
+| ZERO_CURRENT | warning / error | every column of a circuit-current table is identically zero: warning (expected for cogging / open-circuit runs), error when every flux-linkage table is zero too |
 | NON_FINITE | error | NaN or Inf in a result column |
-| NOT_STEADY | info | torque / flux / current: last two electrical periods differ > 2 % |
+| NOT_STEADY | warning (torque, flux linkage) / info (circuit current) | last two electrical periods differ > 2 %: simulate more periods before quoting means. Needs the electrical frequency (given, or derived as FE_DERIVED) |
+| TORQUE_ZERO | warning | a torque table is identically zero, or flat (pk-pk <= 1e-9 x max(1, max abs), at least 2 rows) in every column, while a Torque condition exists: Torque condition not on the moving parts, no excitation, AngularVelocity 0, or a symmetric rotor position in a static study |
+| FE_DERIVED | info | the post check derived the electrical frequency (see section 3) |
 | SOLVER_ERROR / SOLVER_WARNING | error / warning | a solver message not in the known list - read it |
 | known solver messages | see 5 | classified by pattern |
 

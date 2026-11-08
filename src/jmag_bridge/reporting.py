@@ -79,6 +79,23 @@ def _copy_images(paths: list[str], dest: Path, prefix: str) -> list[tuple[str, s
     return out
 
 
+def _unwrap(inv: dict) -> dict:
+    """jmag_physics_check's envelope {ok, result, seconds} -> its result (the check, passed and numbers)."""
+    if isinstance(inv, dict) and isinstance(inv.get("result"), dict):
+        return {"check": inv.get("check"), **inv["result"]}
+    return inv
+
+
+def _passed(inv: dict) -> bool | None:
+    """An invariant's outcome. Accepts jmag_physics_check's whole envelope ({ok, result: {passed}}: ok only means
+    the tool ran), its result ({passed}), or an older dict ({ok} = the physics held)."""
+    if isinstance(inv.get("result"), dict):
+        inv = inv["result"]
+    if "passed" in inv:
+        return inv["passed"]
+    return inv.get("ok")
+
+
 def _study_section(s: dict, img_dir: Path, include_images: bool, doubts: list[str]) -> str:
     name = s.get("name", "?")
     md = [f"## Study `{name}`\n"]
@@ -99,13 +116,17 @@ def _study_section(s: dict, img_dir: Path, include_images: bool, doubts: list[st
     v = verdict_of(s)
     if v in ("FAIL", "CHECK", "NOT CHECKED"):
         doubts.append(f"{name}: verdict {v} - resolve the findings above before using its numbers")
-    inv = s.get("invariants") or []
+    inv = [_unwrap(i) for i in s.get("invariants") or []]
     if inv:
         md.append("### Physics invariants\n")
-        md.append(table(["check", "ok", "key numbers"],
-                        [[i.get("check"), i.get("ok"), {k: v for k, v in i.items() if k not in ("check", "ok")}]
+        md.append(table(["check", "passed", "key numbers"],
+                        [[i.get("check"), _passed(i), {k: v for k, v in i.items()
+                                                      if k not in ("check", "ok", "passed", "verdict")}]
                          for i in inv]))
-        doubts += [f"{name}: invariant {i.get('check')} failed" for i in inv if i.get("ok") is False]
+        doubts += [f"{name}: invariant {i.get('check')} failed" for i in inv if _passed(i) is False]
+    for missing in s.get("unverified") or []:
+        what = {"post-check": "jmag_check(stage='post')", "physics-check": "jmag_physics_check"}.get(missing, missing)
+        doubts.append(f"{name}: {missing} not run on these results this session ({what})")
     if s.get("convergence"):
         md.append("### Convergence\n")
         md.append("```json\n" + json.dumps(s["convergence"], indent=1, default=str)[:3000] + "\n```\n")

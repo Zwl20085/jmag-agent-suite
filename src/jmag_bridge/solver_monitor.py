@@ -79,27 +79,66 @@ def log_messages(folder: str | os.PathLike, statuses=("Warning", "Error")) -> li
     return out
 
 
-def solver_processes(folder: str | None = None) -> list[dict]:
-    """ExecSolver.exe processes (optionally only the one working in `folder`)."""
+#: Solver executables: ExecSolver.exe <calc folder>/Designer.jcf starts jam.exe (the solver proper).
+SOLVER_EXES = ("ExecSolver.exe", "jam.exe")
+
+# A .jcf argument: quoted, or an absolute drive/UNC path that may contain spaces (the match starts at the last
+# drive root before ".jcf", so an executable path earlier on the line is not swallowed), or a bare token.
+_JCF = re.compile(r'"([^"]*\.jcf)"'
+                  r'|((?:[A-Za-z]:[\\/]|\\\\)(?:(?![A-Za-z]:[\\/]).)*?\.jcf)(?=\s|$)'
+                  r'|(\S+\.jcf)(?=\s|$)', re.I)
+_ABS = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\|/)")
+
+
+def folder_from_command(cmd: str) -> str | None:
+    """Calc folder from a solver command line: the directory of its ``...Designer.jcf`` argument. Only absolute
+    paths count; a relative fragment (e.g. the tail of an unquoted path) gives None."""
+    m = _JCF.search(cmd or "")
+    if not m:
+        return None
+    path = (m.group(1) or m.group(2) or m.group(3)).strip()
+    if not _ABS.match(path):
+        return None
+    return str(Path(path).parent)
+
+
+def _under(child: str, parent: str) -> bool:
+    c, p = _norm(child), _norm(parent)
+    return c == p or c.startswith(p + "/")
+
+
+def parse_process_lines(out: str, folder: str | None = None) -> list[dict]:
+    """Rows 'pid<TAB>name<TAB>command' (or 'pid<TAB>command') -> [{pid, name, command}]. With `folder`: only
+    processes whose parsed .jcf argument lies in that folder (path prefix, not a substring of the command line)."""
+    procs = []
+    for line in out.splitlines():
+        if "	" not in line:
+            continue
+        cells = line.split("	", 2)
+        pid, name, cmd = (cells if len(cells) == 3 else [cells[0], "ExecSolver.exe", cells[1]])
+        if not pid.strip().isdigit():
+            continue
+        if folder:
+            own = folder_from_command(cmd)
+            if not own or not _under(own, folder):
+                continue
+        procs.append({"pid": int(pid), "name": name.strip(), "command": cmd.strip()})
+    return procs
+
+
+def solver_processes(folder: str | None = None, names: tuple[str, ...] = ("ExecSolver.exe",)) -> list[dict]:
+    """Solver processes (default ExecSolver.exe only; optionally only the ones working in `folder`)."""
     if os.name != "nt":
         return []
-    ps = ("Get-CimInstance Win32_Process -Filter \"Name='ExecSolver.exe'\" | "
-          "ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }")
+    flt = " or ".join(f"Name='{n}'" for n in names)
+    ps = (f"Get-CimInstance Win32_Process -Filter \"{flt}\" | "
+          "ForEach-Object { \"$($_.ProcessId)`t$($_.Name)`t$($_.CommandLine)\" }")
     try:
         out = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True,
                              timeout=30, creationflags=subprocess.CREATE_NO_WINDOW).stdout
     except (OSError, subprocess.SubprocessError):
         return []
-    procs = []
-    norm = _norm(folder) if folder else None
-    for line in out.splitlines():
-        if "\t" not in line:
-            continue
-        pid, cmd = line.split("\t", 1)
-        if norm and norm not in _norm(cmd):
-            continue
-        procs.append({"pid": int(pid), "command": cmd.strip()})
-    return procs
+    return parse_process_lines(out, folder)
 
 
 def _norm(p: str) -> str:

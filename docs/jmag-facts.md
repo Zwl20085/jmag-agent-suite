@@ -50,7 +50,7 @@ version.
 ## 3D Static (measured 2026-10-19, JMAG-Designer 23.0.01zv)
 
 Two linear transformers (E55/28/21 with a 1 mm gap; P66/56 pot core) driven end to end through the worker.
-Workflow and snippets: `.claude/skills/jmag-simulation/references/static-3d.md`.
+Workflow and snippets: `.claude/skills/jmag-simulation/references/static-3d.md` (index of three parts: basics, rotating, nonlinear).
 
 - `LoadCadDataWithOption(step, name, True, True, "mm")` on a named Open CASCADE STEP assembly gives parts named
   `<assembly>/<product>` (`E_core_pair/Core_Top`); volumes match the CAD to < 2e-5. gmsh's own STEP writer drops
@@ -77,7 +77,7 @@ Workflow and snippets: `.claude/skills/jmag-simulation/references/static-3d.md`.
 ## 3D Static, rotating PM machine (measured 2026-10-20, JMAG-Designer 23.0.01zv)
 
 Axial-flux PM machine, 12 slots / 10 poles, linear materials, full 360 deg model (622 k elements) in 13 rotor
-positions plus a 180 deg periodic sector. Details: `.claude/skills/jmag-simulation/references/static-3d.md` section 8.
+positions plus a 180 deg periodic sector. Details: `.claude/skills/jmag-simulation/references/static-3d-rotating.md` section 8.
 
 - `GetConditionTypes()` of a 3D Static study lists 29 types, among them `RotationPeriodicBoundary`,
   `TranslationPeriodicBoundary`, `Torque`, `Torque_Surface`, `Current`, `CurrentDensity`, `VectorPotentialBoundary`;
@@ -110,7 +110,7 @@ positions plus a 180 deg periodic sector. Details: `.claude/skills/jmag-simulati
 ## Nonlinear 3D Static, sector torque, 2D radial SPM (measured 2026-10-20, JMAG-Designer 23.0.01zv)
 
 Same axial-flux PM machine as above with nonlinear steel (M270-35A, 22 points 0.1-2.2 T), and a radial-flux SPM
-cross-section (12 slots / 10 poles) as a 2D Static study. Details: `static-3d.md` sections 8.2, 8.5 and 9;
+cross-section (12 slots / 10 poles) as a 2D Static study. Details: `static-3d-rotating.md` sections 8.2, 8.5 and `static-3d-nonlinear.md` section 9;
 `jmag-experiments` -> `references/pmsm.md` section 2c.
 
 - User B-H steel through `create_material` (`MagneticPropertyType` 0, `MagneticSteelPermeabilityType` 2, `BhTable`):
@@ -143,7 +143,7 @@ cross-section (12 slots / 10 poles) as a 2D Static study. Details: `static-3d.md
 
 ## Cogging convergence, deep saturation, radial 3D with end windings (measured 2026-10-20, JMAG-Designer 23.0.01zv)
 
-Details: `jmag-experiments` -> `references/pmsm.md` section 2c; `static-3d.md` sections 9.7 and 10.
+Details: `jmag-experiments` -> `references/pmsm.md` section 2c; `static-3d-nonlinear.md` sections 9.7 and 10.
 
 - 2D Static radial SPM cogging (T(1.5) - T(4.5), 12 s / 10 p): gap / magnet size 0.5 -> 0.03125 mm at steel /
   slot-air / coil size 1.5 mm: 1.90, 1.94 (0.25), 1.52 (0.125), 1.35 (0.0625), 1.34 N m/m (0.03125, 1.32 M
@@ -204,3 +204,26 @@ Details: `jmag-experiments` -> `references/pmsm.md` section 2c; `static-3d.md` s
   centre), and its max equals `ContourMaxValue` at steps 65, 100, 129 (2.2035617, 2.2313241, 2.2035609 T).
 - `study.WriteMeshJcf` mesh of the first run: 1713 elements carry part id 22 where the jplot has 20 (same element
   ids, types and centres); taking the part ids from the jplot gives the same parts and max |B| as the run's file.
+
+## Open questions (unverified)
+
+Things the repository does not yet know. Do not state them as facts; settle them on a real JMAG and move the answer
+into the sections above.
+
+- `replay.py` (journal -> script) targeting a second model: the script replays each op with the arguments the
+  journal recorded (`model` only when the original call passed one) against whatever model is current when it
+  runs, so a replay into a project with a second model may act on the wrong one; not tried.
+- Run Analysis window: does Cancel (as opposed to Abort) exist and what does it do? The bridge only presses Abort
+  and answers "Stop calculation"; pressing Cancel there is forbidden by the skills.
+- `jmag_cancel_run` without a bridge-owned job when a Run Analysis window exists (the runner was lost or the engineer
+  started the solve): designed, not yet run live.
+- Typical `last_write_age_s` / `newest_monitor_age_s` of the solver monitor files during long 3D solves: the
+  threshold behind `stalled` has no measured basis for 600 k-element models.
+- The MCP client's own tool timeout (Claude Code and other clients): unknown, so the skills say "keep
+  `wait_seconds` below it" without a number.
+- `jmag_efficiency_map` on an existing IPM project: API signatures only; no efficiency-map study was ever created
+  or evaluated through the bridge.
+- `jmag_list_parts` area and volume units: `Part.Area()` / `Part.Volume()` are returned raw; mm^2 / mm^3 for a mm
+  model is expected, not measured against a known geometry in this repo (the 3D CAD volumes matched to < 2e-5, so
+  volumes are consistent with the CAD unit; the 2D area unit is not stated anywhere).
+- Name clash in `jmag_duplicate_study` (also hit by `jmag_experiment` re-runs).
