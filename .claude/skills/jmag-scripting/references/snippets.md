@@ -1,5 +1,32 @@
 # Snippets for `jmag_exec_python`
 
+Section index (anchors)
+
+- [S1 Helpers](#s1-helpers---verified)
+- [S2 Safe property read](#s2-safe-property-read---verified)
+- [S3 Check the message log yourself](#s3-check-the-message-log-yourself---verified)
+- [S4 Read a result table by internal key](#s4-read-a-result-table-by-internal-key---verified)
+- [S5 Solver report messages and element count](#s5-solver-report-messages-and-element-count---verified)
+- [S6 Part at a point](#s6-part-at-a-point---verified)
+- [S7 Study equations](#s7-study-equations---verified)
+- [S8 Design-table cases](#s8-design-table-cases---verified)
+- [S9 Create a loss study](#s9-create-a-loss-study---verified)
+- [S10 Efficiency-map definition](#s10-efficiency-map-definition---unverified)
+- [S11 Point probe of B](#s11-point-probe-of-b---unverified)
+- [S12 Section graph along the air gap](#s12-section-graph-along-the-air-gap---unverified)
+- [S-3D-1 Import a STEP and rename parts by inside point](#s-3d-1-import-a-step-and-rename-parts-by-inside-point---verified-3d-2026-10-19)
+- [S-3D-2 3D `Current` condition with an inflow face](#s-3d-2-3d-current-condition-with-an-inflow-face---verified-3d-2026-10-19)
+- [S-3D-3 `SymmetryBoundary` on faces picked by position](#s-3d-3-symmetryboundary-on-faces-picked-by-position---verified-3d-2026-10-19)
+- [S-3D-4 3D mesh controls, part sizes and the energy table](#s-3d-4-3d-mesh-controls-part-sizes-and-the-energy-table---verified-3d-2026-10-19)
+- [S-3D-5 Read `CoilFlux` / `CoilCurrent` / `StoredEnergy`](#s-3d-5-read-coilflux--coilcurrent--storedenergy---verified-3d-2026-10-19)
+- [S-3D-6 `RotationPeriodicBoundary` on one cut plane (anti-periodic sector)](#s-3d-6-rotationperiodicboundary-on-one-cut-plane-anti-periodic-sector---verified-3d-2026-10-20)
+- [S-3D-7 Custom linear magnet and per-part magnetisation direction](#s-3d-7-custom-linear-magnet-and-per-part-magnetisation-direction---verified-3d-2026-10-20)
+- [S-3D-8 Nodal `Torque` on the rotor parts and the `Torque` table](#s-3d-8-nodal-torque-on-the-rotor-parts-and-the-torque-table---verified-3d-2026-10-20)
+- [S-3D-9 List the condition types and their property tables](#s-3d-9-list-the-condition-types-and-their-property-tables---verified-3d-2026-10-20)
+- [S-3D-10 User B-H steel and its full read-back](#s-3d-10-user-b-h-steel-and-its-full-read-back---verified-3d-2026-10-20)
+- [S-3D-11 Nonlinear iteration / tolerance study properties](#s-3d-11-nonlinear-iteration--tolerance-study-properties---verified-3d-2026-10-20)
+- [S-3D-12 Nonlinear iteration count from `jcgmntr`](#s-3d-12-nonlinear-iteration-count-from-jcgmntr---verified-3d-2026-10-20)
+
 Contents
 - S1 Helpers: need(), find model/study by name without logging errors - VERIFIED
 - S2 Safe property read - VERIFIED
@@ -33,10 +60,10 @@ run through the bridge: use on a copy, read back, report what happened, and mark
 
 **VERIFIED (3D, 2026-10-19)** = run live through `jmag_exec_python` on JMAG-Designer 23.0 in two 3D
 Static transformer studies whose inductances matched independent FE within 0.9 % (workflow and
-traps: `jmag-simulation` -> `references/static-3d.md`). **VERIFIED (3D, 2026-10-20)** = run live the
+traps: `jmag-simulation` -> `references/static-3d-basics.md`). **VERIFIED (3D, 2026-10-20)** = run live the
 same way on a 12-slot / 10-pole axial-flux PM machine (13 rotor positions, one periodic sector) whose
-flux linkage, load torque and cogging matched independent FE within 0.6 % (`static-3d.md` section 8),
-linear and, for S-3D-10 to S-3D-12, with nonlinear B-H steel (`static-3d.md` section 9).
+flux linkage, load torque and cogging matched independent FE within 0.6 % (`static-3d-rotating.md` section 8),
+linear and, for S-3D-10 to S-3D-12, with nonlinear B-H steel (`static-3d-nonlinear.md` section 9).
 
 Each snippet assumes S1 is pasted above it (the worker does not share state between calls).
 Globals available: `app`, `designer`, `ctx`, `OpError`, `result`.
@@ -443,7 +470,7 @@ for t in ("RotationPeriodicBoundary", "Torque", "Torque_Surface", "SymmetryBound
 result = out
 ```
 3D Static on 23.0: 29 types, no `RotationMotion` (list in `jmag-simulation` ->
-`references/static-3d.md` section 8.1). `SymmetryBoundary` has no properties.
+`references/static-3d-rotating.md` section 8.1). `SymmetryBoundary` has no properties.
 
 ## S-3D-10 User B-H steel and its full read-back - VERIFIED (3D, 2026-10-20)
 

@@ -1,8 +1,16 @@
 # Feedback: finding codes, what they mean, what to do
 
-Every tool returns `{"ok", "result", "error": {"message", "hint"}, "jmag_messages"}`.
-`jmag_check` and the post-run check return `{"verdict": PASS|CHECK|FAIL, "findings": [...]}`.
-PASS = no warnings/errors (infos allowed), CHECK = warnings to think about, FAIL = errors.
+Every tool returns `{"ok", "result" | "error": {"message", "hint"}, "jmag_messages", "seconds"}`.
+`jmag_check` / `jmag_physics_check`: `ok` only means "the tool ran"; the judgement is `passed` (bool) and
+`verdict` inside `result`, plus `hint` (the fixes to apply). Read `passed`/`verdict`, never `ok`, to decide
+whether the model is fine. `jmag_check`: PASS = no warnings/errors (infos allowed), CHECK = warnings to think
+about (`passed` is still true), FAIL = errors (`passed` false); the findings list stays at the top level
+(`findings` for `stage='pre'`, `health.findings` for `stage='post'`). `jmag_physics_check`: PASS or FAIL; a
+failed invariant is `ok: true, passed: false` and `result.hint` names the likely causes.
+Result reads (`jmag_get_result`, `jmag_export_results`, `jmag_plot`, `jmag_experiment`) carry
+`result.unverified`: the checks not yet run on that study's current results this session (`post-check`,
+`physics-check`; `[]` when both ran; reset when the study is solved again). Run them before quoting a number,
+or repeat the number to the user as unverified.
 
 ## Call level
 
@@ -32,6 +40,8 @@ PASS = no warnings/errors (infos allowed), CHECK = warnings to think about, FAIL
 | NO_TORQUE_COND | info | no torque table will exist |
 | COARSE_MESH / NO_MESH_YET | warning / info | mesh |
 | CHECK_MAGNETIZATION | info | look at a B contour after the run |
+| STEP_CHECKS_SKIPPED | info | electrical frequency unknown: COARSE_TIME_STEP / SHORT_SPAN not checked - pass `electrical_frequency_hz` |
+| FE_DERIVED | info | electrical frequency derived from speed + `poles` equation or source `Frequency`; check the named source |
 
 ## Post-run
 
@@ -46,8 +56,9 @@ PASS = no warnings/errors (infos allowed), CHECK = warnings to think about, FAIL
 | LEAKAGE_L_IGNORED | info | normal unless you set leakage L on purpose |
 | STEPS_CHANGED | warning | rows != configured steps: use the returned time axis |
 | NON_FINITE | error | NaN/Inf in results |
-| ZERO_CURRENT | error | every circuit current is zero |
-| NOT_STEADY | info | last two electrical periods differ > 2 % |
+| ZERO_CURRENT | warning / error | every circuit current is zero (warning: expected for cogging / open circuit; error when flux linkage is zero too) |
+| NOT_STEADY | warning (torque, flux) / info (current) | last two electrical periods differ > 2 %: simulate more periods before quoting means |
+| TORQUE_ZERO | warning | torque identically zero or flat to 1e-9 (>= 2 rows) with a Torque condition: check the Torque condition parts, excitation, speed, rotor position |
 
 ### Convergence
 `convergence.steps_at_iteration_limit` lists steps where Newton hit `NonlinearMaxIteration`.

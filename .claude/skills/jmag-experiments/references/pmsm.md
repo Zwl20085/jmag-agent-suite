@@ -9,6 +9,22 @@ Contents
 6. Torque vs current angle, MTPA
 7. Torque-speed envelope
 
+**Conventions for `jmag_experiment` (read first)**
+
+- `poles` is the number of poles **2p** (12-slot 4-pole: `slots=12, poles=4`), never pole pairs;
+  `f_e = rpm/60 * poles/2`.
+- `rpm` defaults when omitted: `cogging` 60, `back_emf` / `load_point` 1000. Pass `rpm` for a real operating point.
+- The experiment runs on a duplicate named `<study>_<kind>` (or `new_study`). A second call with the same name
+  is refused by the bridge before JMAG is touched (`ok: false`, hint): pass a fresh `new_study`, remove the old
+  copy with `jmag_delete_study`, or analyze it with `study='<study>_<kind>'`, `duplicate=false`,
+  `action='analyze'` (re-reads a finished solve without re-running it).
+- A refused pre-check, a failed or aborted solve returns `ok: false` with `result.precheck` / `result.run`; the
+  duplicated study is left in the project (the hint names it). `result.next` (poll `jmag_run_status`, then
+  `action='analyze'`) appears only while the solve is still running.
+- Harmonic orders in the returned spectra are limited: `jmag_get_result` returns `harmonic_amplitudes` for orders
+  0..9 by default (index k = order k, [0] = DC); ask for more with `n_harmonics`. A harmonic above the limit is
+  not "zero", it is not reported.
+
 ---
 
 ## 1. Base study: surface-PM motor (Transient2D, rotation, 3-phase)
@@ -73,7 +89,7 @@ gap, < 5 % change in pk-pk) before believing it.
 
 `jmag_experiment` works on a 2D transient study. For a machine that needs 3D (axial flux, end
 effects) use 3D Static cases instead, one rotor angle each (`jmag-simulation` ->
-`references/static-3d.md` section 8; VERIFIED on 23.0, 2026-10-20, 12-slot / 10-pole axial-flux PM):
+`references/static-3d-rotating.md` section 8; VERIFIED on 23.0, 2026-10-20, 12-slot / 10-pole axial-flux PM):
 1. One merged STEP per angle (stator + rotated rotor + air, gap split into stator / rotor slabs);
    >= 6 angles per cogging period plus the period end as a repeat check.
 2. Per case: import, rename, materials (magnets: S-3D-7), `SymmetryBoundary` on every outer face
@@ -86,11 +102,11 @@ Expect ~80 s per no-load case at ~620 k elements. Each angle has its own mesh, s
 mesh noise (+-0.035 N m on 0.33 N m pk-pk there; the two ends of a period differed by 0.011 N m):
 report pk-pk over the period and the end-of-period mismatch as the noise level. Achieved vs an
 independent 3D FE: psi 0.2-0.6 %, load torque 0.3 %, cogging pk-pk 0.3 %. With nonlinear B-H steel
-(`static-3d.md` section 9: user B-H material, `NonlinearMaxIteration` / `NonlinearTolerance`,
+(`static-3d-nonlinear.md` section 9: user B-H material, `NonlinearMaxIteration` / `NonlinearTolerance`,
 iterations from `jcgmntr`): about 9 iterations, mesh 30-47 s + solve 120-200 s per case at 622 k
 elements; psi 0.2-0.6 %, load torque 0.6 % at 5 A and 15 A, cogging pk-pk 0.03 %. A 180 deg periodic
 sector's `Torque` is the full-model value (factor 1). Arbitrary (off-grid) rotor angles: the same
-route, one STEP per angle (`static-3d.md` section 8.9; VERIFIED 2026-10-20 at 0.7 / 1.3 / 2.9 deg:
+route, one STEP per angle (`static-3d-rotating.md` section 8.9; VERIFIED 2026-10-20 at 0.7 / 1.3 / 2.9 deg:
 psi 0.6 %, load torque 0.3-0.7 %, cogging within 0.019 N m of an independent 3D FE with a mortar
 sliding interface; the off-grid points lie on the cubic through JMAG's own 1 deg points to
 0.007 N m, which is this route's measured noise).
@@ -107,7 +123,7 @@ side) against an independent solver:
    repeated names first, below), `jmag_create_study(study_type="Static2D")`.
 3. Materials: steel `linear_2000` (or the grade); magnets with pattern `Radial`, origin (0, 0, 0)
    and `SetOrientation` outward / inward alternating per pole (the run used the custom Linear(Br)
-   magnet of `static-3d.md` 8.3 through `jmag_exec_python`); coils `Copper`; the rest `Air`.
+   magnet of `static-3d-rotating.md` 8.3 through `jmag_exec_python`); coils `Copper`; the rest `Air`.
 4. One `jmag_add_current` per coil side (`turns`, `direction` up / down from the winding table);
    load study = `jmag_duplicate_study` + `jmag_set_properties(kind="condition")` `Current` = i_phase
    from the dq currents at that angle.

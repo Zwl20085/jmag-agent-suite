@@ -27,7 +27,7 @@ Never "fix" by deleting results, killing processes or re-running blindly without
 | `ok: false`, `JmagError` | `jmag_messages` | JMAG logged an error in that op -> treat the result as invalid, fix the named object/property |
 | `ok: false`, `OpError` | `error.hint` | bridge refused (unknown name, missing part, read-back mismatch) -> use the suggested names |
 | "a solve is running; only read-only tools are allowed" | `jmag_run_status` | wait, or `jmag_cancel_run` |
-| Run never finishes / no progress | `jmag_run_status` (steps, convergence, dialogs) | dialog waiting, huge mesh, Newton stuck -> `jmag_cancel_run` (never kill Designer) |
+| Run never finishes / no progress | `jmag_run_status`, `jmag_status` (`stalled`, `newest_monitor_age_s`) | dialog waiting, huge mesh, Newton stuck -> procedure in `references/dialogs.md` section 3; `jmag_cancel_run` (never kill Designer) |
 | NEGATIVE_ELEMENT_VOLUME | contour/model image with mesh | moving parts on a normal mesh or a part bridging rotor and stator -> slide mesh (`MeshType 1`, `AutoSlide 1`), suppress the gap part |
 | NONLINEAR_NOT_CONVERGED / ITERATION_LIMIT | `convergence.steps_at_iteration_limit` | at current zero-crossings: harmless; at peak load: `NonlinearMaxIteration 50`, refine mesh, shorter step, check B-H |
 | Torque / flux / EMF too small by a factor = stack length in mm (e.g. 50x) | `jmag_get_properties(kind='study')` | `ModelThickness` still 1 mm (DEFAULT_STACK_LENGTH) |
@@ -46,7 +46,7 @@ Never "fix" by deleting results, killing processes or re-running blindly without
 | Toolchain doubt | `jmag_self_test` | 6/6 PASS means bridge + JMAG + licence are fine; the problem is the model |
 
 Longer explanations and the decision tree for hangs, crashes and wrong results:
-`references/symptoms.md`. Every finding code with level and fix: `references/finding-codes.md`.
+`references/symptoms.md`. Every finding code with level and fix: `references/finding-codes.md`. Dialog titles, safe buttons, stalled solves: `references/dialogs.md`.
 
 ## Process hygiene (what is and is not safe)
 

@@ -99,8 +99,8 @@ async def main(work: Path, pid: int | None, keep_open: bool) -> dict:
             print("post-check:", post["verdict"])
             for f in post["findings"]:
                 print("   ", f["level"], f["code"], " ".join(f["message"].split())[:160])
-            pb = await call("jmag_physics_check", {"study": S, "check": "power_balance", "speed_rpm": RPM,
-                                                   "electrical_frequency_hz": FE})
+            pb = (await call("jmag_physics_check", {"study": S, "check": "power_balance", "speed_rpm": RPM,
+                                                    "electrical_frequency_hz": FE}))["result"]
             flux = await call("jmag_get_result", {"study": S, "table": "Coil Flux-Linkage", "columns": ["CoilU"],
                                                   "electrical_frequency_hz": FE})
             psi1 = flux["result"]["stats"]["CoilU"]["last_period"]["fundamental"]
@@ -115,7 +115,7 @@ async def main(work: Path, pid: int | None, keep_open: bool) -> dict:
             print(json.dumps(summary, indent=2))
             if not keep_open:
                 await call("jmag_quit", {"save": True}, must=False)
-            ok = pb["ok"] and abs(abs(pb["mean_torque_Nm"]) - t_analytic) / t_analytic < 0.05
+            ok = pb["passed"] and abs(abs(pb["mean_torque_Nm"]) - t_analytic) / t_analytic < 0.05
             if not ok:
                 raise Fail("physics checks failed")
             return summary

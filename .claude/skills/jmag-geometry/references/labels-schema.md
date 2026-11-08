@@ -61,3 +61,10 @@ directly with a point at mid-gap between two magnets.
    with the layer prefix (`0/`).
 3. Areas within ~0.5 % of `expected.areas` (arcs are exact; polylines lose a little).
 4. Every part in `coils`, `magnets`, `rotor_parts`, `conductors` exists after renaming.
+
+## 5. Starting from a user-supplied DXF
+
+`jmag_dxf_inspect(path)` returns `labels_draft` in this schema (`draft: true`): `parts` (name guess, inside point,
+`confidence`), `magnets` (center_deg, alternating polarity, confidence 0.3), `rotor_parts`, `suppress` (air-gap
+guess), `expected` (part_count, areas). Correct the names and roles, add `coils` (from `jmag_winding_plan`) and
+`parameters.stack_mm`, drop `draft` and the `confidence` keys before use. A double-layer winding needs the slot already split in two layer regions (see `jmag-geometry` SKILL.md, User-supplied DXF).

@@ -67,7 +67,7 @@ them lets you interpret what you see.
 - Every Designer instance spawns a Geometry Editor helper (`modeller.exe`); it is left behind when
   Designer dies -> `jmag_cleanup`.
 
-## 3D Static (verified 2026-10-19; details in `references/static-3d.md`)
+## 3D Static (verified 2026-10-19; details in `references/static-3d-basics.md`)
 - `Current` with `DirectionType = 1` (Vector) on a closed winding: the run finishes, no error, and the
   coil carries no current (flux linkage ~2e-20 Wb). It is not a "circulate about an axis" mode.
 - `DirectionType = 0` (InflowFace) needs the outflow face on a symmetry or periodic boundary. A slit
@@ -84,7 +84,7 @@ them lets you interpret what you see.
 - `jmag_add_current` writes `Direction2D` and is for 2D studies; the 3D `Current` goes through
   `jmag_exec_python` (snippet S-3D-2).
 
-## 3D Static, rotating machines (verified 2026-10-20; `references/static-3d.md` section 8)
+## 3D Static, rotating machines (verified 2026-10-20; `references/static-3d-rotating.md` section 8)
 - No `RotationMotion` in a Static study: one rotor angle per case. Write one merged STEP per angle and
   re-import it (~80 s per case at ~620 k elements, ~160 s with a load study).
 - `SymmetryBoundary` has no type property; it is always flux-parallel. Faces with no condition are
@@ -100,7 +100,7 @@ them lets you interpret what you see.
 - Per-angle meshes make cogging noisy (+-0.035 N m on a 0.33 N m peak-to-peak here); `StoredEnergy`
   with magnets is not comparable with another tool's 1/2 integral(nu B^2).
 
-## Nonlinear 3D Static, sectors, 2D radial machines (verified 2026-10-20; `references/static-3d.md` 8.5, 9)
+## Nonlinear 3D Static, sectors, 2D radial machines (verified 2026-10-20; `references/static-3d-rotating.md` 8.5, `static-3d-nonlinear.md` 9)
 - Nonlinear defaults: `NonlinearMaxIteration` 15, `NonlinearTolerance` 1e-3 (also `IccgTolerance`
   1e-8, `IccgMaxIteration` 5000). They were enough on a PM machine (1e-5 changed psi by 4e-8);
   read the iteration count from `jcgmntr` (`jmag_check(stage="post")` -> `convergence`) before

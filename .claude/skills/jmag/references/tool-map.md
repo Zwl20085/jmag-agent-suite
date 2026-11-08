@@ -2,14 +2,17 @@
 
 Contents: Session - Project - Geometry - Design helpers - Study setup - Materials - Excitation -
 Circuit - Mesh - Run - Standard tests - Losses and efficiency - Parametric - Results -
-Knowledge - Meta
+Knowledge - Meta - Blocking times
 
-Every tool returns `{"ok", "result", "error": {"message", "hint"}, "jmag_messages", "seconds"}`.
+Every tool returns `{"ok", "result" | "error": {"message", "hint"}, "jmag_messages", "seconds"}` (except
+`jmag_dialogs`, a list, and image tools, `[json, image]`). Result reads carry `result.unverified`: the checks
+(`post-check`, `physics-check`) not yet run on that study's current results. For `jmag_check` /
+`jmag_physics_check` / `jmag_self_test`, `ok` means "the tool ran"; read `passed` and `verdict` in `result`.
 The tool's own description is authoritative for parameters; this file is for finding the tool.
 Tools marked (new) were added with the skill family; read their description before first use.
 
 ## Session
-- `jmag_status` - installation, worker and connection state, running JMAG instances, open dialogs. Call first.
+- `jmag_status` - installation, worker and connection state, running JMAG instances, open dialogs; `solver_processes`, `newest_monitor_age_s`, `stalled` for a running solve. Call first.
 - `jmag_connect(pid?, launch_new?, visible?)` - attach to a JMAG (by pid / last used) or start a detached new one.
 - `jmag_capabilities(model?)` (new) - JMAG version, study types offered (magnetic, thermal, structural ...), API members present for cases/loss/maps/optimisation/winding/export, solver executables. No licence query exists: a listed type can still fail at Run.
 - `jmag_dialogs(click?, title_filter?)` - list modal dialogs; `click="Cancel"` presses a button.
@@ -28,13 +31,14 @@ Tools marked (new) were added with the skill family; read their description befo
 ## Geometry
 - `jmag_import_dxf(path, model_name?)` - 2D import; every closed loop becomes a part (area, centroid returned).
 - `jmag_import_cad(path, model_name?, healing?, remove_sheet?, unit?)` - 3D STEP/IGES/Parasolid/SAT import; parts arrive as `<assembly>/<product>` (verified 23.0). Preview the names offline: `python -m jmag_bridge.cad3d model.step`. 3D Static workflow: `jmag-simulation` -> `references/static-3d.md`.
-- `jmag_list_parts(model?)` - id, name, area/volume, centroid.
+- `jmag_dxf_inspect(path)` (new) - offline look at a user-supplied DXF: closed loops, draft labels and inside points, to review before import. See `jmag-geometry` -> User-supplied DXF.
+- `jmag_list_parts(model?)` - id, name, area/volume, centroid (area/volume units unverified).
 - `jmag_rename_parts(renames)` - rename by name, id or an `[x, y]` point inside the part.
 - `jmag_suppress_parts(parts, suppress?, study?)` - treat parts as absent (e.g. a DXF air-gap ring).
 - `jmag_model_image(path?, show_mesh?)` - PNG of geometry or mesh.
 
 ## Design helpers (pure Python, no JMAG needed)
-- `jmag_estimate(kind, params?)` (new) - hand calculation with value, formula, assumptions and expected FEA tolerance; `kind='list'` lists kinds (gap B, Carter, winding factor, EMF/torque constant, dq torque, inductances, gapped core, tooth/yoke B, slot fill, copper loss, electrical frequency, step plan, Steinmetz iron loss).
+- `jmag_estimate(kind, params?)` (new) - hand calculation with value, formula, assumptions and expected FEA tolerance; `kind='list'` lists kinds (`dq_to_phase` and `phase_to_dq` convert dq currents/fluxes to phase quantities and back; gap B, Carter, winding factor, EMF/torque constant, dq torque, inductances, gapped core, tooth/yoke B, slot fill, copper loss, electrical frequency, step plan, Steinmetz iron loss).
 - `jmag_units(convert, value, from_unit, to_unit, poles?, base?)` (new) - speed (mech/electrical), length, flux density, angle (mech/electrical), area incl. AWG, per-unit.
 - `jmag_winding_plan(slots, poles, phases?, layers?, coil_pitch?, turns?, parallel_paths?)` (new) - star-of-slots layout: balance check, slot map with part names, kw per harmonic, MMF harmonics, symmetry sector, `labels_coils` for FEM-coil sides.
 
@@ -69,7 +73,7 @@ Tools marked (new) were added with the skill family; read their description befo
 - `jmag_circuit_image(study, path?)` - render the circuit to check the wiring.
 
 ## Mesh
-- `jmag_mesh(study)` - generate now; element/vertex counts; fails loudly on bad geometry.
+- `jmag_mesh(study, wait_seconds?)` - generate now (may gain `wait_seconds`; blocks up to 3600 s); element/vertex counts; fails loudly on bad geometry.
 - `jmag_mesh_size(study, parts, size, name?)` - local mesh size on parts.
 
 ## Run
@@ -77,8 +81,9 @@ Tools marked (new) were added with the skill family; read their description befo
 - `jmag_run(study, wait_seconds?, overwrite?, check_first?, force?, electrical_frequency_hz?)` - solve in a runner process.
 - `jmag_run_status` - progress, ETA, convergence, dialogs; solver report and post-check when finished. Top-level
   `ok` is false when the run failed or `solver_aborted` is true (JMAG's messages say the solver aborted): no usable
-  results even if `state` is `finished`.
-- `jmag_cancel_run` - safe cancel (Abort -> answer the prompt -> only then terminate the solver).
+  results even if `state` is `finished`. Without a bridge-owned run (server restart, GUI solve): `owned: false`,
+  `state: running` while a solver or 'Run Analysis' window exists, else `state: none` (ok false).
+- `jmag_cancel_run` - safe cancel (Abort -> answer the prompt -> only then terminate the solver). Also works without a bridge-owned job when a Run Analysis window exists (unverified live).
 - `jmag_solver_report(study)` - solver errors/warnings, element count, calc folder.
 
 ## Standard tests
@@ -95,7 +100,7 @@ Tools marked (new) were added with the skill family; read their description befo
 
 ## Results
 - `jmag_list_results(study, case?)` - result tables (name, unit, columns, rows); `case` = design-table case.
-- `jmag_get_result(study, table, columns?, electrical_frequency_hz?, max_points?, case?)` - one table with stats, harmonics, periodicity.
+- `jmag_get_result(study, table, columns?, electrical_frequency_hz?, max_points?, case?, n_harmonics?)` - one table with stats, harmonics (index k = order k, [0] = DC; limited by `n_harmonics`), periodicity.
 - `jmag_export_results(study, out_dir, tables?)` - one CSV per table.
 - `jmag_export_table(study, path, kind?, ...)` (new) - JMAG's own writers: all tables, all cases, one table, field tables (save first: a field-export sequence crashed Designer once).
 - `jmag_case_report(study, path, case?)` (new) - JMAG's own case report (`WriteCaseReport`); save the project first.
@@ -103,10 +108,12 @@ Tools marked (new) were added with the skill family; read their description befo
 - `jmag_field_data(study, step?, quantities?, out?, case?, per_part?)` (new, 2D) - the field at one step as a JSON file (nodes, triangles, parts, B/Bx/By/Az/J ...) read from the result file outside JMAG, plus per-part max/min/mean; verified against `jmag_contour_image`.
 - `jmag_field_plot(study | data_path, step?, quantity?, flux_lines?, parts?, hide_air?, smooth?, kind?, cmap?, vmin?, vmax?, dpi?)` (new, 2D) - the bridge's own field plot (|B| + flux lines + part outlines, or the mesh) with the drawn numbers; air hidden by default (`hide_air=False` = full domain).
 - `jmag_field_probe(study | data_path, circle | segment, quantity?, pole_pairs?, method?)` (new, 2D) - values along a circle or segment (air-gap Br/Bt waveform) with harmonics and a PNG.
-- `jmag_physics_check(study, check, ...)` - `kvl` | `energy` | `power_balance` invariants.
+- `jmag_physics_check(study, check, ...)` - `kvl` | `energy` | `power_balance` invariants; `result.passed` /
+  `verdict` / `hint`. Omitted speed, electrical frequency, coil, probe and resistance are derived from the study
+  (`result.defaults_used`), so `jmag_physics_check(study, 'power_balance')` is one call for a 3-phase PMSM.
 - `jmag_compare(study_a, study_b, tables?, threshold_pct?)` (new) - setup differences that could explain a change, plus result statistics side by side with % deltas.
 - `jmag_plot(kind, data | csv_path | study+table, ...)` (new) - `waveform` | `fft` | `sweep` | `map` | `torque_speed` PNG plus the plotted numbers in text (needs the `plots` extra / matplotlib); field and mesh plots go through `jmag_field_plot`.
-- `jmag_make_report(title, studies, out_dir, ...)` (new) - Markdown folder (setup, every finding, convergence, statistics with sources, images, invariants you pass in, sweeps, doubts, replay script).
+- `jmag_make_report(title, studies, out_dir, ...)` (new) - Markdown folder (setup, every finding, convergence, statistics with sources, images, invariants you pass in or the ones recorded this session, sweeps, doubts incl. missing checks, replay script).
 
 ## Knowledge and escape hatch
 - `jmag_docs_search(query, limit?)` - search the JMAG manual installed on this machine.
@@ -119,3 +126,20 @@ Tools marked (new) were added with the skill family; read their description befo
 - `jmag_journal(export_script?, session_only?)` - log of state changes; exports a replayable script.
 - `jmag_star_repo(action)` - the user's answer to the one-time `first_run_note` (star | open | dismiss), as `first_run_action` says; only after an explicit answer.
 - `jmag_guide(topic?, reference?)` (new) - these skills and their references as text, for clients that do not load skills.
+
+## Blocking times
+A call that blocks longer than your client's tool timeout fails on the client while JMAG keeps working: check
+`jmag_status` and `jmag_dialogs` before retrying.
+
+| Tool | Blocks up to |
+|---|---|
+| `jmag_mesh` | 3600 s |
+| `jmag_import_cad` | 1800 s |
+| `jmag_loss_study` (run) | 3600 s |
+| `jmag_export_results` | 900 s |
+| `jmag_experiment` | 600 s (`wait_seconds`; then `action='analyze'`) |
+| `jmag_exec_python` | 600 s (`timeout_s`) |
+| `jmag_open_project`, `jmag_save_project` | 600 s |
+| `jmag_self_test` | ~120 s |
+| `jmag_docs_search` | ~60 s on the first call (builds the index), fast afterwards |
+| `jmag_run` | `wait_seconds` (default 120), then returns `state: running`; poll `jmag_run_status` |

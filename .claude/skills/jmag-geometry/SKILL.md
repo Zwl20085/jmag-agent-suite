@@ -19,7 +19,7 @@ imports it in one call. The script is the single source of truth for dimensions.
      readable (JMAG shows `<assembly>/<product>`; gmsh's own STEP writer drops the names). Check
      the file with `python -m jmag_bridge.cad3d model.step` before import. A model with closed
      windings for a 3D Static study must be a **half model cut through the winding axis** so the
-     coil end faces lie on the symmetry plane (`jmag-simulation` -> `references/static-3d.md`).
+     coil end faces lie on the symmetry plane (`jmag-simulation` -> `references/static-3d-basics.md`).
 2. **A labels JSON** with one point strictly inside every part, plus everything the simulation
    needs later (winding layout, magnet polarity/direction, rotor part list, air parts to
    suppress, key dimensions). Schema: `references/labels-schema.md`. The agent then calls
@@ -83,6 +83,23 @@ direction; double layer adds the layer: `Slot01a_U+`, `Slot01b_W-`), `Bar<k>` (c
 suggests in its slot map, so its `labels_coils` output plugs straight into `jmag_winding` /
 `jmag_add_fem_coil`. A double-layer slot must be drawn as two parts (one per layer).
 
+## User-supplied DXF (the user hands you a drawing)
+
+1. `jmag_dxf_inspect(path)` (offline, no JMAG): the regions the import will create (area mm^2, centroid, a point
+   strictly inside, r_min/r_max about the origin, layer, holes), a role guess with `confidence` per region
+   (stator/rotor/slot/magnet/airgap/shaft-like for a machine about the origin, core/coil-like otherwise), open
+   ends and unread entities (SPLINE, blocks) in `warnings`, and `labels_draft`. Read it before importing anything.
+   It does not see edges that cross without an end point at the crossing: JMAG may split those, so compare the
+   region count with `jmag_import_dxf`.
+2. Review the draft labels with the user: confidence < 0.7 is a guess; magnet polarities alternate by default
+   (confidence 0.3). Fix names and write them as a labels JSON (`references/labels-schema.md`). Draft names
+   `Region<k>` mean "no role guessed".
+3. Then the Workflow below (saved project, import, compare areas with the inspect output, rename by point).
+4. **Tooth-coil / double-layer windings need each slot split into two layer regions** (`Slot01a_U+`,
+   `Slot01b_W-`): a slot drawn as one face can carry only one phase and one direction. Split by
+   regenerating the geometry with the templates (`references/templates.md`), or ask the user for a
+   DXF with the slot already split; do not guess the split line. Layouts: `jmag_winding_plan`.
+
 ## Workflow
 
 1. Write/modify the script, run it, plot it (matplotlib) or open the DXF if unsure.
@@ -96,4 +113,4 @@ suggests in its slot map, so its `labels_coils` output plugs straight into `jmag
    `jmag_import_cad(path, unit="mm")` -> compare volumes with the CAD -> rename by `[x, y, z]`
    points. Put in the labels JSON what the 3D study needs and JMAG cannot read from the STEP: a
    point on every face of the cut plane / outer boundary, and each coil's inflow end face. 3D coil
-   and face conditions: `jmag-simulation` -> `references/static-3d.md` (verified).
+   and face conditions: `jmag-simulation` -> `references/static-3d-basics.md` and `static-3d-rotating.md` (verified).

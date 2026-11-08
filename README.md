@@ -11,7 +11,7 @@ English | [简体中文](README.zh-CN.md)
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB)
 ![JMAG](https://img.shields.io/badge/JMAG--Designer-23.x-0b6e99)
 ![Platform](https://img.shields.io/badge/platform-Windows-0078D6)
-![Tools](https://img.shields.io/badge/MCP%20tools-78-6f42c1)
+![Tools](https://img.shields.io/badge/MCP%20tools-79-6f42c1)
 ![Skills](https://img.shields.io/badge/Claude%20skills-10-ff7b00)
 ![Version](https://img.shields.io/badge/version-0.4.0-informational)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -25,7 +25,7 @@ English | [简体中文](README.zh-CN.md)
 
 **What you get**
 
-- **78 MCP tools** drive JMAG-Designer: import, studies, circuits, mesh, runs, results.
+- **79 MCP tools** drive JMAG-Designer: import, studies, circuits, mesh, runs, results.
 - **Every value read back**, every call checked against JMAG's message log.
 - **Physics checks** (KVL, energy, power balance) and a known-answer self-test.
 - **Fields drawn outside JMAG**: mesh, \|B\|, flux lines and air-gap harmonics as data and clean plots.
@@ -44,7 +44,9 @@ English | [简体中文](README.zh-CN.md)
 
 > *The run aborted with a negative element volume and the torque is -0.3 Nm. What is wrong?*
 
-Every tool answers with `{"ok", "result", "error": {"message", "hint"}, "jmag_messages"}`.
+Every tool answers with `{"ok", "result", "error": {"message", "hint"}, "jmag_messages", "seconds"}`.
+`ok` says the tool ran; physics checks say whether the physics held in `result.passed` / `result.verdict`,
+and results not yet checked carry `result.unverified`.
 The hint is the next action to take.
 
 ## See the field, outside JMAG
@@ -201,7 +203,7 @@ The verified column is the [12-slot / 4-pole SPM example](examples/spm_motor) an
 3D Static was verified on two linear transformers (L within 0.9 % of independent FE), a 12-slot / 10-pole axial-flux
 PM machine (linear and deep-saturation nonlinear, full model and periodic sector: psi 0.2-0.6 %, load torque 0.3-1.0 %)
 and a radial SPM with straight end windings (psi 0.1 %, load torque 0.2-0.6 %); see the
-[3D workflow](.claude/skills/jmag-simulation/references/static-3d.md). Nothing 3D beyond Static has been run.
+[3D workflow](.claude/skills/jmag-simulation/references/static-3d-basics.md) (also [rotating machines](.claude/skills/jmag-simulation/references/static-3d-rotating.md), [nonlinear steel](.claude/skills/jmag-simulation/references/static-3d-nonlinear.md)). Nothing 3D beyond Static has been run.
 
 </details>
 
@@ -215,12 +217,12 @@ today. The bridge has no thermal solver workflow.
 ## Tools by task
 
 <details>
-<summary>78 MCP tools, all prefixed <code>jmag_</code></summary>
+<summary>79 MCP tools, all prefixed <code>jmag_</code></summary>
 
 | Task | Tools |
 |---|---|
 | Session | `status` `connect` `capabilities` `dialogs` `screenshot` `cleanup` `quit` `doctor` (install diagnostics) |
-| Project and geometry | `new_project` `open_project` `save_project` `summary` `inventory` `import_dxf` `import_cad` `list_parts` `rename_parts` `suppress_parts` `model_image` |
+| Project and geometry | `new_project` `open_project` `save_project` `summary` `inventory` `dxf_inspect` `import_dxf` `import_cad` `list_parts` `rename_parts` `suppress_parts` `model_image` |
 | Design helpers (no JMAG needed) | `estimate` `units` `winding_plan` |
 | Study setup | `create_study` `duplicate_study` `delete_study` `get_properties` `set_properties` `set_step` `set_equations` `get_equations` |
 | Materials | `find_materials` `create_material` `set_material` |
@@ -266,6 +268,7 @@ A test fails the build if any document names a tool that does not exist.
 
 The bridge does not automate JMAG's Geometry Editor.
 Draw parametric geometry in a script you can review and test, and export DXF (2D, bundled writer `jmag_bridge.dxf.Dxf`) or STEP (3D) plus a labels JSON with one inside-point per part.
+For a DXF you did not write, `jmag_dxf_inspect` lists the regions the import will create (area, inside point, layer), guesses their roles with a confidence and drafts the labels JSON, without JMAG.
 [`examples/spm_motor`](examples/spm_motor) is a complete parametric SPM motor, driven end to end through the MCP tools.
 
 ## Architecture

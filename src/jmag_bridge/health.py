@@ -25,7 +25,12 @@ THRESHOLDS = {
     "power_balance_rel": 0.05,  # |<sum i dpsi/dt> - <T> omega| / max of the two
     "steady_rel": 0.02,         # last two periods differ by less than this
     "min_steps_per_period": 20,
+    "flat_rel": 1e-9,           # a torque table whose pk-pk is below this (relative to max(1, |max|)) is flat
 }
+
+#: Equation names (case-insensitive) read as the pole count 2p / the pole-pair count p when deriving f_e.
+POLE_EQUATIONS = ("poles", "pole", "n_poles", "npoles", "num_poles", "pole_number", "number_of_poles")
+POLE_PAIR_EQUATIONS = ("pole_pairs", "polepairs", "pp", "p")
 
 
 def _f(level: str, code: str, message: str, fix: str = "") -> dict:
@@ -48,10 +53,94 @@ def summarize(findings: list[dict]) -> dict:
     return {"verdict": verdict, "counts": counts, "findings": findings}
 
 
+# --------------------------------------------------------------------------- facts -> operating point
+
+def motion_speed_rpm(facts: dict) -> float | None:
+    """AngularVelocity [rpm] of the first RotationMotion condition with a non-zero speed, else None."""
+    for c in facts.get("conditions", []) or []:
+        if c.get("type") == "RotationMotion":
+            w = _prop(c, "AngularVelocity")
+            try:
+                if w is not None and float(w) != 0.0:
+                    return float(w)
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def _equation_value(facts: dict, names: Sequence[str]) -> float | None:
+    eqs = facts.get("equations") or {}
+    low = {str(k).lower(): v for k, v in eqs.items()}
+    for n in names:
+        e = low.get(n)
+        v = e.get("value") if isinstance(e, dict) else e
+        try:
+            if v is not None and float(v) > 0:
+                return float(v)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _source_frequency(facts: dict) -> tuple[float, str] | None:
+    circuit = facts.get("circuit") or {}
+    for k in circuit.get("components", []) if circuit.get("has_circuit") else []:
+        if "Source" in str(k.get("type", "")):
+            f = _prop(k, "Frequency")
+            try:
+                if f is not None and float(f) > 0:
+                    return float(f), str(k.get("name"))
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def derive_electrical_frequency(facts: dict) -> dict | None:
+    """Electrical frequency of a rotating-machine study from what study_facts already carries (no JMAG probe).
+
+    1. RotationMotion speed + a study equation naming the pole count (``poles`` ...) or pole pairs (``p`` ...):
+       f_e = poles / 2 * rpm / 60.
+    2. RotationMotion speed + the Frequency property of a circuit source (3-phase sources carry it), accepted
+       only when the implied pole count 2 * 60 * f / rpm is an even integer (a synchronous drive).
+    Returns {"hz", "source", "speed_rpm", "poles"} or None. Magnet part counts are not used: V-shaped poles and
+    sector models make them differ from the pole count."""
+    rpm = motion_speed_rpm(facts)
+    if not rpm:
+        return None
+    poles = _equation_value(facts, POLE_EQUATIONS)
+    if poles is None:
+        pp = _equation_value(facts, POLE_PAIR_EQUATIONS)
+        poles = 2 * pp if pp else None
+    if poles:
+        return {"hz": poles / 2.0 * abs(rpm) / 60.0, "source": "RotationMotion speed and the study's pole equation",
+                "speed_rpm": rpm, "poles": poles}
+    src = _source_frequency(facts)
+    if src:
+        implied = 2 * 60.0 * src[0] / abs(rpm)
+        whole = round(implied)
+        if abs(implied - whole) < 1e-6 * max(1.0, implied) and whole >= 2 and whole % 2 == 0:
+            return {"hz": src[0], "source": f"Frequency of circuit source '{src[1]}' (consistent with "
+                                            f"{whole} poles at {rpm:g} rpm)",
+                    "speed_rpm": rpm, "poles": whole}
+    return None
+
+
 # --------------------------------------------------------------------------- preflight
 
 def preflight(facts: dict, electrical_frequency_hz: float | None = None) -> list[dict]:
     out: list[dict] = []
+    if electrical_frequency_hz is None and str(facts.get("type", "")).startswith("Transient"):
+        d = derive_electrical_frequency(facts)
+        if d:
+            electrical_frequency_hz = d["hz"]
+            out.append(_f("info", "FE_DERIVED", f"electrical frequency {d['hz']:.6g} Hz taken from {d['source']}",
+                          "pass electrical_frequency_hz explicitly if this is not the electrical frequency"))
+        else:
+            rpm = motion_speed_rpm(facts)
+            out.append(_f("info", "STEP_CHECKS_SKIPPED",
+                          "COARSE_TIME_STEP and SHORT_SPAN were not checked: the electrical frequency is unknown",
+                          f"pass electrical_frequency_hz=<poles/2 * {rpm:g}/60>" if rpm else
+                          "pass electrical_frequency_hz=<excitation frequency; poles/2 * rpm/60 for a machine>"))
     stype = facts.get("type", "")
     transient = stype.startswith("Transient")
     dim = facts.get("dimension")
@@ -346,9 +435,22 @@ def solver_abort_messages(run_env: dict, log_entries: Iterable[dict] | None = No
     return out
 
 
+def _flat(ys: Sequence[float]) -> bool:
+    """All zero, or (with >= 2 samples) constant to THRESHOLDS['flat_rel']."""
+    if not ys:
+        return False
+    peak = max(abs(v) for v in ys)
+    if peak == 0.0:
+        return True
+    return len(ys) >= 2 and (max(ys) - min(ys)) <= THRESHOLDS["flat_rel"] * max(1.0, peak)
+
+
 def postflight(run_info: dict, convergence: dict | None = None, tables: dict | None = None,
-               electrical_frequency_hz: float | None = None, configured_steps: int | None = None) -> list[dict]:
-    """run_info: has_result/errors/warnings; tables: {title: {"x": [...], "columns": {name: [...]}}}."""
+               electrical_frequency_hz: float | None = None, configured_steps: int | None = None,
+               has_torque_condition: bool | None = None) -> list[dict]:
+    """run_info: has_result/errors/warnings; tables: {title: {"x": [...], "columns": {name: [...]}}}.
+
+    has_torque_condition: False skips TORQUE_ZERO (None = unknown: a torque table implies the condition)."""
     out: list[dict] = []
     if configured_steps and tables:
         rows = max((len(tb.get("x", [])) for tb in tables.values()), default=0)
@@ -391,14 +493,24 @@ def postflight(run_info: dict, convergence: dict | None = None, tables: dict | N
                               + (" and so is the flux linkage" if flux_zero else ""),
                               "source not connected, wrong wiring or zero amplitude; "
                               "expected for cogging-torque / open-circuit runs"))
+        if (has_torque_condition is not False and title.lower().startswith("torque") and cols
+                and all(finite(ys) for ys in cols.values()) and all(_flat(ys) for ys in cols.values())):
+            zero = all(ys and max(abs(v) for v in ys) == 0.0 for ys in cols.values())
+            out.append(_f("warning", "TORQUE_ZERO",
+                          f"{title}: torque is {'identically zero' if zero else 'constant (flat)'} over every step",
+                          "Torque condition not on the moving parts, no excitation, rotor not moving (AngularVelocity "
+                          "0) or a symmetric rotor position in a static study; check jmag_list_conditions and "
+                          "jmag_contour_image"))
         for col, ys in cols.items():
             if not finite(ys):
                 out.append(_f("error", "NON_FINITE", f"{title} / {col} contains NaN or Inf"))
                 continue
-            if period and len(ys) > 4 and title.lower().startswith(("torque", "coil flux", "fem coil flux", "circuit current")):
+            low = title.lower()
+            if period and len(ys) > 4 and low.startswith(("torque", "coil flux", "fem coil flux", "circuit current")):
                 p = periodicity(tb["x"], ys, period)
                 if p and not p["steady"]:
-                    out.append(_f("info", "NOT_STEADY",
+                    # torque and flux linkage feed every reported number: warning; currents settle slower: info
+                    out.append(_f("info" if low.startswith("circuit current") else "warning", "NOT_STEADY",
                                   f"{title} / {col}: last two periods differ by {100 * p['max_rel_diff_last_two_periods']:.1f}%",
                                   "simulate more periods or use time-periodic (TP-EEC) settings"))
     return out

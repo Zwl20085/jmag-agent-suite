@@ -361,3 +361,77 @@ def test_create_loss_study_validates_reference_steps_before_replace():
         with pytest.raises(ops.OpError, match="reference_steps"):
             ops.create_loss_study(ctx, "S", "Loss", reference_steps=bad, replace=True)
     assert log == []
+
+
+# --------------------------------------------------------------------------- 0.4.0: default hints
+
+class _Named:
+    def __init__(self, name):
+        self.name = name
+
+    def GetName(self):
+        return self.name
+
+
+class _Model(_Named):
+    def __init__(self, studies):
+        _Named.__init__(self, "M")
+        self.studies = [_Named(s) for s in studies]
+        self.duplicated = []
+
+    def NumStudies(self):
+        return len(self.studies)
+
+    def GetStudy(self, i):
+        return self.studies[i]
+
+    def DuplicateStudyName(self, *a):
+        self.duplicated.append(a)
+
+
+class _DupCtx:
+    def __init__(self, model):
+        self.m = model
+
+    def study(self, ref=None, model=None):
+        return _Named(ref)
+
+    def model_of(self, s):
+        return self.m
+
+
+def test_op_error_always_has_a_hint():
+    assert ops.OpError("x").hint == ops.DEFAULT_HINT and "jmag_messages" in ops.DEFAULT_HINT
+    assert ops.OpError("x", "do y").hint == "do y"
+
+
+def test_duplicate_study_refuses_an_existing_name_before_touching_jmag():
+    m = _Model(["Base", "Base_cogging"])
+    with pytest.raises(ops.OpError) as e:
+        ops.duplicate_study(_DupCtx(m), "Base", "Base_cogging")
+    assert "already exists" in e.value.message and "jmag_delete_study(study='Base_cogging')" in e.value.hint
+    assert m.duplicated == []
+
+
+def test_bad_arguments_hint_points_to_the_tool_docstring():
+    r = ops.Context(None).dispatch("ping", {"bogus": 1})
+    assert r["error"]["type"] == "BadArguments" and "jmag_* tool's description" in r["error"]["hint"]
+
+
+def test_condition_not_found_lists_existing_names():
+    class S:
+        conds = [_Named("Rot"), _Named("T")]
+
+        def NumConditions(self):
+            return 2
+
+        def GetCondition(self, i):
+            return self.conds[i]
+
+    class C(_DupCtx):
+        def study(self, ref=None, model=None):
+            return S()
+
+    with pytest.raises(ops.OpError) as e:
+        ops.delete_condition(C(None), "S", "Nope")
+    assert "'Rot'" in e.value.message and "'T'" in e.value.message

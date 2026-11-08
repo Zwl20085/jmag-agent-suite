@@ -265,3 +265,64 @@ def test_solver_abort_messages_ignore_warnings_and_clean_runs():
                                     "warnings": ["The step control has been automatically updated"]}}
     assert solver_abort_messages(clean, warn_only) == []
     assert solver_abort_messages({}) == []
+
+
+# --------------------------------------------------------------------------- 0.4.0: f_e, skipped checks, zero torque
+
+def _motion(rpm):
+    return {"name": "Rot", "type": "RotationMotion", "parts": [1], "properties": [{"name": "AngularVelocity", "value": rpm}]}
+
+
+def test_step_checks_skipped_is_visible():
+    f = facts()
+    f["conditions"].append(_motion(3000))
+    found = {x["code"]: x for x in health.preflight(f)}
+    assert found["STEP_CHECKS_SKIPPED"]["level"] == "info"
+    assert "poles/2 * 3000/60" in found["STEP_CHECKS_SKIPPED"]["fix"]
+    assert "STEP_CHECKS_SKIPPED" not in codes(health.preflight(f, electrical_frequency_hz=50))
+    static = facts(type="Static2D", step=None)
+    assert "STEP_CHECKS_SKIPPED" not in codes(health.preflight(static))
+
+
+def test_fe_derived_from_pole_equation_runs_step_checks():
+    f = facts(step={"StepType": 0, "Step": 11, "TimeStep": 1 / 500}, equations={"Poles": {"value": 4}})
+    f["conditions"].append(_motion(1500))
+    d = health.derive_electrical_frequency(f)
+    assert d["hz"] == 50.0 and d["poles"] == 4
+    c = codes(health.preflight(f))
+    assert {"FE_DERIVED", "COARSE_TIME_STEP"} <= c and "STEP_CHECKS_SKIPPED" not in c
+
+
+def test_fe_derived_from_source_frequency_only_when_poles_integer():
+    f = facts()
+    f["conditions"].append(_motion(1500))
+    f["circuit"]["components"][0]["properties"] = [{"name": "Frequency", "value": 100.0}]
+    assert health.derive_electrical_frequency(f)["hz"] == 100.0           # 8 poles at 1500 rpm
+    f["circuit"]["components"][0]["properties"] = [{"name": "Frequency", "value": 33.0}]
+    assert health.derive_electrical_frequency(f) is None                   # 2.64 poles: not a synchronous drive
+    assert health.derive_electrical_frequency(facts()) is None             # no motion
+
+
+def test_torque_zero_and_flat_flagged():
+    zero = {"Torque: Nm": {"x": [0, 1, 2], "columns": {"Torque": [0.0, 0.0, 0.0]}}}
+    f = [x for x in health.postflight({"has_result": True}, None, zero) if x["code"] == "TORQUE_ZERO"]
+    assert [x["level"] for x in f] == ["warning"] and "identically zero" in f[0]["message"]
+    flat = {"Torque: Nm": {"x": [0, 1, 2], "columns": {"Torque": [2.5, 2.5, 2.5 + 1e-12]}}}
+    assert "TORQUE_ZERO" in codes(health.postflight({"has_result": True}, None, flat))
+    live = {"Torque: Nm": {"x": [0, 1, 2], "columns": {"Torque": [2.5, 2.6, 2.4]}}}
+    assert "TORQUE_ZERO" not in codes(health.postflight({"has_result": True}, None, live))
+    one_row = {"Torque: Nm": {"x": [0], "columns": {"Torque": [2.5]}}}      # a static study: one value is not flat
+    assert "TORQUE_ZERO" not in codes(health.postflight({"has_result": True}, None, one_row))
+    assert "TORQUE_ZERO" not in codes(health.postflight({"has_result": True}, None, zero, has_torque_condition=False))
+
+
+def test_not_steady_is_warning_for_torque_and_flux_info_for_current():
+    t = [k / 100 for k in range(300)]
+    growing = [math.sin(2 * math.pi * x) * (1 + x) for x in t]
+    tables = {"Torque: Nm": {"x": t, "columns": {"T": [2 + 0.5 * v for v in growing]}},
+              "Coil Flux-Linkage: Wb": {"x": t, "columns": {"U": growing}},
+              "Circuit Current: A": {"x": t, "columns": {"U": growing}}}
+    f = [x for x in health.postflight({"has_result": True}, None, tables, electrical_frequency_hz=1.0)
+         if x["code"] == "NOT_STEADY"]
+    levels = {x["message"].split(" / ")[0]: x["level"] for x in f}
+    assert levels == {"Torque: Nm": "warning", "Coil Flux-Linkage: Wb": "warning", "Circuit Current: A": "info"}

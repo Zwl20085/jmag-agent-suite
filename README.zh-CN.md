@@ -11,7 +11,7 @@
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB)
 ![JMAG](https://img.shields.io/badge/JMAG--Designer-23.x-0b6e99)
 ![Platform](https://img.shields.io/badge/platform-Windows-0078D6)
-![Tools](https://img.shields.io/badge/MCP%20tools-78-6f42c1)
+![Tools](https://img.shields.io/badge/MCP%20tools-79-6f42c1)
 ![Skills](https://img.shields.io/badge/Claude%20skills-10-ff7b00)
 ![Version](https://img.shields.io/badge/version-0.4.0-informational)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -25,7 +25,7 @@
 
 **你能得到什么**
 
-- **78 个 MCP 工具**驱动 JMAG-Designer：导入、研究、电路、网格、求解、结果。
+- **79 个 MCP 工具**驱动 JMAG-Designer：导入、研究、电路、网格、求解、结果。
 - **每个设置值都回读**，每次调用都对照 JMAG 的消息日志检查。
 - **物理不变量**（KVL、能量、功率平衡）和已知答案自检。
 - **在 JMAG 之外绘制场图**：网格、\|B\|、磁力线和气隙谐波，既是数据也是清晰的图。
@@ -44,7 +44,8 @@
 
 > *运行因单元体积为负而中止，转矩是 -0.3 Nm。问题出在哪里？*
 
-每个工具都返回 `{"ok", "result", "error": {"message", "hint"}, "jmag_messages"}`。
+每个工具都返回 `{"ok", "result", "error": {"message", "hint"}, "jmag_messages", "seconds"}`。
+`ok` 只表示工具运行成功；物理检查是否通过看 `result.passed` / `result.verdict`，尚未检查的结果带有 `result.unverified`。
 其中 hint 就是下一步该做的操作。
 
 ## 在 JMAG 之外看场
@@ -199,7 +200,7 @@ claude mcp add jmag --scope user -- "$PWD\.venv\Scripts\python.exe" -m jmag_brid
 其他器件类型上的“Verified”表示该步骤与器件无关。
 三维静态已在以下模型上验证：两个线性变压器（电感与独立有限元相差 0.9 % 以内）；一台 12 槽 / 10 极轴向磁通 PM 电机
 （线性及深度饱和非线性，整机和周期扇区：磁链 0.2-0.6 %，负载转矩 0.3-1.0 %）；一台带直线端部绕组的径向 SPM
-（磁链 0.1 %，负载转矩 0.2-0.6 %）。详见[三维流程](.claude/skills/jmag-simulation/references/static-3d.md)。三维静态以外的三维分析尚未运行。
+（磁链 0.1 %，负载转矩 0.2-0.6 %）。详见[三维流程](.claude/skills/jmag-simulation/references/static-3d-basics.md)（另见[旋转电机](.claude/skills/jmag-simulation/references/static-3d-rotating.md)、[非线性钢材](.claude/skills/jmag-simulation/references/static-3d-nonlinear.md)）。三维静态以外的三维分析尚未运行。
 
 </details>
 
@@ -212,12 +213,12 @@ claude mcp add jmag --scope user -- "$PWD\.venv\Scripts\python.exe" -m jmag_brid
 ## 按任务分类的工具
 
 <details>
-<summary>78 个 MCP 工具，全部以 <code>jmag_</code> 为前缀</summary>
+<summary>79 个 MCP 工具，全部以 <code>jmag_</code> 为前缀</summary>
 
 | 任务 | 工具 |
 |---|---|
 | 会话 | `status` `connect` `capabilities` `dialogs` `screenshot` `cleanup` `quit` `doctor`（安装诊断） |
-| 项目和几何 | `new_project` `open_project` `save_project` `summary` `inventory` `import_dxf` `import_cad` `list_parts` `rename_parts` `suppress_parts` `model_image` |
+| 项目和几何 | `new_project` `open_project` `save_project` `summary` `inventory` `dxf_inspect` `import_dxf` `import_cad` `list_parts` `rename_parts` `suppress_parts` `model_image` |
 | 设计辅助（无需 JMAG） | `estimate` `units` `winding_plan` |
 | 研究设置 | `create_study` `duplicate_study` `delete_study` `get_properties` `set_properties` `set_step` `set_equations` `get_equations` |
 | 材料 | `find_materials` `create_material` `set_material` |
@@ -263,6 +264,7 @@ claude mcp add jmag --scope user -- "$PWD\.venv\Scripts\python.exe" -m jmag_brid
 
 桥接层不自动化 JMAG 的 Geometry Editor。
 请用可审阅、可测试的脚本绘制参数化几何，导出 DXF（二维，自带写入器 `jmag_bridge.dxf.Dxf`）或 STEP（三维），外加一个每个部件一个内部点的标签 JSON。
+对于不是你写的 DXF，`jmag_dxf_inspect` 无需 JMAG 即可列出导入后会生成的区域（面积、内部点、图层），按置信度猜测各区域的角色，并起草标签 JSON。
 [`examples/spm_motor`](examples/spm_motor) 是一个完整的参数化 SPM 电机，全程通过 MCP 工具驱动。
 
 ## 架构

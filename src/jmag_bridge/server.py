@@ -2,10 +2,12 @@
 
 Every tool returns an envelope:
 
-    {"ok": bool, "result": ..., "error": {"message", "hint"}, "jmag_messages": [...]}
+    {"ok": bool, "result": ..., "error": {"message", "hint"}, "jmag_messages": [...], "seconds": float}
 
 ``ok`` is False when the operation raised *or* JMAG logged an error while it ran
-(JMAG rarely raises; it logs). Read ``hint`` - it usually names the fix.
+(JMAG rarely raises; it logs). Read ``hint`` - it usually names the fix. ``ok`` says the tool ran; whether
+the physics passed is ``result.passed`` / ``result.verdict`` (jmag_check, jmag_physics_check).
+Exceptions: jmag_dialogs returns a list; image tools return [json envelope, Image].
 """
 from __future__ import annotations
 
@@ -13,6 +15,7 @@ import asyncio
 import json
 import math
 import os
+import subprocess
 import threading
 import time
 import uuid
@@ -26,6 +29,9 @@ except ImportError:  # SDK v1
 from mcp.types import ToolAnnotations
 
 from . import compare, estimate, fielddata, health, materials, plotting, reporting, solver_monitor, star, units, winding, winui
+from . import server_support as sup
+from .server_support import (_field_quantities, _field_summary, _probe_harmonics, _round, _setup_table, _sig,
+                             _visible_parts, wrap)
 from .config import find_jmag, load_state, save_state, state_dir
 from .docs_index import DocsIndex
 from .worker_client import Worker, WorkerError, abandon_all
@@ -42,6 +48,11 @@ Unknown property names: jmag_get_properties lists valid ones; jmag_docs_search s
 Before FEA: jmag_estimate / jmag_winding_plan / jmag_units give the expected numbers (no JMAG needed). After:
 jmag_plot, jmag_compare, jmag_make_report; jmag_inventory shows the whole project tree.
 If your client did not load the jmag skills (not Claude Code), call jmag_guide first and follow its safety rules.
+Run contract: jmag_run returns state running|finished|failed with ok and solver_aborted (ok=false or
+solver_aborted=true: no usable results). While state='running', poll jmag_run_status; it is not an error.
+Cancel a solve only with jmag_cancel_run - never jmag_dialogs(click='Cancel') on a 'Run Analysis' window.
+Set wait_seconds below your client's tool-call timeout; long tools state their maximum blocking time.
+ok=true means the tool ran: physics passed only when result.passed is true; result.unverified lists missing checks.
 """
 
 mcp = _Server("jmag", instructions=INSTRUCTIONS)
@@ -91,6 +102,7 @@ class Bridge:
 
 
 B = Bridge()
+VERIFY = sup.VerifyRecord()          # which studies had post-check / physics-check on their current results
 
 
 def envelope(resp: dict) -> dict:
@@ -104,13 +116,21 @@ def envelope(resp: dict) -> dict:
     msgs = (resp.get("jmag") or {}).get("messages")
     if msgs:
         out["jmag_messages"] = msgs
-    if resp.get("elapsed") is not None:
-        out["seconds"] = resp["elapsed"]
+    out["seconds"] = resp["elapsed"] if resp.get("elapsed") is not None else 0.0
     return out
 
 
+#: Ops after which the verification record no longer describes the project (new project, new JMAG).
+_PROJECT_OPS = {"project_new", "project_open", "connect", "quit_app"}
+
+
 async def run_op(op: str, timeout: float = 600, **args: Any) -> dict:
-    return envelope(await B.call(op, timeout, **{k: v for k, v in args.items() if v is not None}))
+    if op in ("run", "run_cases"):
+        VERIFY.invalidate(args.get("study"))      # new results: earlier checks no longer apply
+    env = envelope(await B.call(op, timeout, **{k: v for k, v in args.items() if v is not None}))
+    if op in _PROJECT_OPS and env.get("ok"):
+        VERIFY.clear()
+    return env
 
 
 def out_path(kind: str, path: str | None, suffix: str = ".png") -> str:
@@ -133,11 +153,22 @@ def with_image(env: dict, key: str = "path") -> list:
 
 @mcp.tool()
 async def jmag_status() -> dict:
-    """Installation, worker and JMAG connection status, plus any modal dialogs JMAG is showing. Call this first."""
+    """Installation, worker, JMAG connection and modal-dialog state. Call this first in every conversation.
+    result: install, state_dir, running_instances (JMAG windows on this machine), remembered_jmag_pid, worker (ping),
+    jmag (app_info, only when connected), dialogs (progress windows carry kind='progress'), job (current or last solve
+    of this bridge), and for solves the bridge may not own (server restart, GUI run): solver_processes (ExecSolver/jam
+    pids), newest_monitor_age_s (seconds since the newest solver monitor file was written) and stalled (true when that
+    age exceeds 600 s while a solver process exists: look at jmag_dialogs / jmag_screenshot, stop it only with
+    jmag_cancel_run). Blocks at most ~80 s.
+    No JMAG install found: ok=false, result.install null, hint = set JMAG_HOME (jmag_doctor diagnoses the install).
+    """
+    t0 = time.time()
     st: dict = {"install": B.install.as_dict() if B.install else None, "state_dir": str(state_dir())}
     if not B.install:
-        st["hint"] = "set JMAG_HOME to the JMAG-Designer folder (contains designer.exe and python3.8/)"
-        return st
+        return wrap(st, ok=False, t0=t0, error={
+            "message": "JMAG-Designer installation not found",
+            "hint": "set JMAG_HOME to the JMAG-Designer folder (contains designer.exe and python3.8/); jmag_doctor "
+                    "diagnoses the install"})
     from .launcher import running_instances
     st["remembered_jmag_pid"] = load_state().get("jmag_pid")
     st["running_instances"] = await asyncio.to_thread(running_instances)
@@ -150,7 +181,18 @@ async def jmag_status() -> dict:
     st["dialogs"] = await asyncio.to_thread(winui.dialogs)
     if B.job:
         st["job"] = {k: B.job[k] for k in ("id", "study", "started", "done") if k in B.job}
-    return st
+    st.update(await _solver_status())
+    return wrap(st, t0=t0)
+
+
+async def _solver_status() -> dict:
+    """Solver processes / newest monitor age / stalled, also for solves this bridge did not start."""
+    folder = B.job.get("folder") if B.job and not B.job.get("done") else None
+    try:
+        return await asyncio.to_thread(sup.solver_status, folder)
+    except (OSError, ValueError) as e:  # the status must never fail because process listing failed
+        return {"solver_processes": [], "newest_monitor_age_s": None, "stalled": False,
+                "solver_status_error": str(e)}
 
 
 @mcp.tool()
@@ -196,7 +238,10 @@ async def jmag_connect(pid: int | None = None, launch_new: bool = False, visible
 
 @mcp.tool()
 async def jmag_quit(save: bool = False) -> dict:
-    """Close the connected JMAG-Designer (optionally saving the project)."""
+    """Close the connected JMAG-Designer. save=False (default) discards unsaved changes: call jmag_save_project first if the
+    project matters. Refused while a solve runs (use jmag_cancel_run). Forgets the remembered pid, so the next session
+    starts with jmag_connect. Blocks up to 120 s.
+    """
     env = await run_op("quit_app", 120, save=save)
     if env["ok"]:
         save_state(jmag_pid=None)
@@ -205,10 +250,13 @@ async def jmag_quit(save: bool = False) -> dict:
 
 @mcp.tool()
 async def jmag_dialogs(click: str | None = None, title_filter: str | None = None) -> list | dict:
-    """List modal dialogs JMAG is showing (title, text, buttons). Pass click='Cancel' (or any button label) to press it.
-
-    JMAG blocks on dialogs (e.g. 'save project before creating geometry', license prompts). If a tool hangs or times out,
-    check here first. Prefer Cancel/No unless you are sure what the dialog does.
+    """List the dialogs JMAG shows (title, text, buttons, kind) or press one button. JMAG blocks on dialogs
+    ('save project before creating geometry', licence prompts): when a call hangs or times out, look here first.
+    click='<button label>' presses it; pass title_filter (a regex on the title) so exactly the dialog you inspected is
+    targeted. Progress windows (kind='progress', the 'Run Analysis' window of a solve) are listed but must be left
+    alone: NEVER click Cancel or Abort there; stop a solve only with jmag_cancel_run (it answers JMAG's prompt in the
+    verified order). For an unknown dialog prefer Cancel/No, or ask the user.
+    Returns a list (not the usual envelope).
     """
     if click:
         return await asyncio.to_thread(winui.click, click, title_filter or "")
@@ -217,7 +265,11 @@ async def jmag_dialogs(click: str | None = None, title_filter: str | None = None
 
 @mcp.tool()
 async def jmag_screenshot(out_dir: str | None = None) -> list:
-    """Capture all JMAG windows (main window, Geometry Editor, dialogs) as images, even if hidden behind others."""
+    """Capture every JMAG window (main window, Geometry Editor, dialogs) as PNG, even when hidden behind others.
+    out_dir: folder for the files (default: a folder under the bridge outputs). Returns the list of window rows (with
+    the PNG path) plus up to 4 images. Use it when a call hangs or a result looks odd. Changes nothing in JMAG and
+    needs no connection.
+    """
     d = out_dir or str(state_dir() / "outputs" / f"screens_{time.strftime('%H%M%S')}")
     rows = await asyncio.to_thread(winui.screenshots, d)
     items: list = [json.dumps(rows, indent=1)]
@@ -230,25 +282,37 @@ async def jmag_screenshot(out_dir: str | None = None) -> list:
 
 @mcp.tool()
 async def jmag_new_project(path: str, overwrite: bool = False) -> dict:
-    """Create a new project and save it at `path` (*.jproj). Required before DXF import (Geometry Editor needs a saved project)."""
+    """Create a new project and save it at `path` (*.jproj, absolute path recommended). A saved project is required before
+    any DXF import: the Geometry Editor blocks forever on a modal dialog otherwise. overwrite=False refuses to replace an
+    existing file. Example: jmag_new_project("D:/work/spm12s10p.jproj"). Blocks up to 120 s.
+    """
     return await run_op("project_new", 120, path=path, overwrite=overwrite)
 
 
 @mcp.tool()
 async def jmag_open_project(path: str) -> dict:
-    """Open an existing *.jproj. Work on a copy when experimenting with a valuable project."""
+    """Open an existing *.jproj; it becomes the current project. Work on a COPY of a valuable project: later calls
+    modify it and jmag_save_project overwrites it. Follow with jmag_inventory to see models, studies, conditions and
+    results before changing anything. Blocks up to 600 s for large projects.
+    """
     return await run_op("project_open", 600, path=path)
 
 
 @mcp.tool()
 async def jmag_save_project(path: str | None = None) -> dict:
-    """Save the project (Save As when `path` is given)."""
+    """Save the current project; with `path` it is Save As and the open project becomes that file. Save before risky
+    steps: the first mesh/run of a new setup, and jmag_export_table field kinds (a field-export sequence crashed
+    Designer 23.0 once). Blocks up to 600 s.
+    """
     return await run_op("project_save", 600, path=path)
 
 
 @mcp.tool()
 async def jmag_summary() -> dict:
-    """Project overview: models (dimension, parts) and studies (type, results)."""
+    """Cheap project overview from JMAG: jmag_pid, version, project path/name, running_process, models (name, dimension
+    2|3, part count) and studies (name, type, has_result). Use jmag_inventory for conditions, calc folders and result
+    tables. Blocks up to 60 s.
+    """
     return await run_op("app_info", 60)
 
 
@@ -264,17 +328,59 @@ async def jmag_import_dxf(path: str, model_name: str | None = None) -> dict:
     return await run_op("import_dxf", 600, path=path, model_name=model_name)
 
 
+@mcp.tool(annotations=READ_ONLY)
+async def jmag_dxf_inspect(path: str) -> dict:
+    """Read a 2D DXF (user-supplied or generated) BEFORE jmag_import_dxf: the closed regions JMAG's import will
+    create, with area [mm^2], centroid, a point strictly inside each (use it for jmag_rename_parts), radii
+    r_min/r_max about the origin, layer and holes. Pure Python, no JMAG; read-only.
+
+    Role guesses per region with confidence 0..1: machine cross-sections about the origin -> stator-like,
+    rotor-like, slot-like, magnet-like, airgap-like, shaft-like; other devices -> core-like, coil-like; else
+    unknown. Layer names (magnet, slot, coil, stator, rotor, shaft, air, gap) raise or override a guess.
+    result.labels_draft is a draft labels JSON (jmag-geometry labels-schema: parts with points, magnets with
+    alternating polarity, rotor_parts, suppress, expected areas) with confidence per entry - confirm every name
+    and role (confidence < 0.7 is a guess), add coils (jmag_winding_plan labels_coils) and parameters.stack_mm.
+    Entities read: LINE, ARC, CIRCLE, LWPOLYLINE, POLYLINE (bulges = arcs). Edges ending on another edge are split
+    there; edges crossing without an end point, SPLINE/ELLIPSE/blocks are not handled (result.warnings says so,
+    open ends are counted). Areas from 1-degree arc sampling (about 0.005 % low on arcs).
+    """
+    from . import dxf as dxf_mod
+    from .dxf_inspect import DxfReadError
+    t0 = time.time()
+    try:
+        res = await asyncio.to_thread(dxf_mod.inspect, str(Path(path).resolve()))
+    except DxfReadError as e:
+        return wrap(ok=False, t0=t0, error={"message": str(e), "hint": e.hint or "check the file"})
+    except (ValueError, IndexError, ZeroDivisionError) as e:
+        return wrap(ok=False, t0=t0, error={"message": f"could not interpret the DXF: {e}",
+                                             "hint": "re-export as ASCII DXF with lines/arcs/polylines only"})
+    return wrap(res, t0=t0)
+
+
 @mcp.tool()
 async def jmag_import_cad(path: str, model_name: str | None = None, healing: bool = True, remove_sheet: bool = True,
                           unit: str = "mm") -> dict:
-    """Import 3D CAD (STEP/IGES/Parasolid/SAT) as a 3D model. Name solids in your CAD script to get readable part names."""
+    """Import 3D CAD (STEP/IGES/Parasolid/SAT) as a 3D model; needs a saved project. unit: length unit of the file
+    (default "mm"; other values unverified); healing and remove_sheet default true.
+    Name the solids in your CAD script: a named Open CASCADE STEP assembly gives parts '<assembly>/<product>'
+    (verified 23.0); preview the names offline with `python -m jmag_bridge.cad3d model.step`. Unnamed products get
+    generic names - fix them with jmag_rename_parts using an inside point. Returns model, dimension, parts.
+
+    BLOCKING_TOOLS: blocks up to 1800 s (large assemblies with healing). There is no wait_seconds / background
+    mode (unlike jmag_run): if your client's tool timeout is shorter, the call is cut off client-side while JMAG
+    keeps importing - then poll jmag_status / jmag_list_parts instead of re-importing.
+    """
     return await run_op("import_cad", 1800, path=path, model_name=model_name, healing=healing,
                         remove_sheet=remove_sheet, unit=unit)
 
 
 @mcp.tool()
 async def jmag_list_parts(model: str | None = None) -> dict:
-    """Parts of a model: id, name, area (2D) or volume (3D), centroid."""
+    """Parts of a model: id, name, centroid [x, y, z]; 2D also area and inside_point [x, y] (a point inside the part,
+    unlike the centroid of C/L shapes), 3D volume. Coordinates in the model length unit (mm unless imported otherwise).
+    Area and volume are JMAG's raw values; mm^2 / mm^3 for a mm model is expected but UNVERIFIED, so compare one part
+    with your own geometry first. inside_point works as the "part" reference in later calls. Blocks up to 60 s.
+    """
     return await run_op("list_parts", 60, model=model)
 
 
@@ -296,7 +402,11 @@ async def jmag_suppress_parts(parts: list, suppress: bool = True, study: str | N
 
 @mcp.tool()
 async def jmag_model_image(path: str | None = None, show_mesh: bool = False) -> list:
-    """Image of the current model (geometry, or mesh with show_mesh=true) for visual verification."""
+    """Render the current model to a PNG and return it as an image: geometry, or the mesh with show_mesh=true (run
+    jmag_mesh first). path: output file (default: under the bridge outputs). Returns result.path.
+    Use after import, renaming and material assignment to check parts visually, and again after local mesh sizes.
+    Blocks up to 120 s.
+    """
     return with_image(await run_op("model_image", 120, path=out_path("model", path), show_mesh=show_mesh))
 
 
@@ -314,13 +424,18 @@ async def jmag_create_study(study_type: str, name: str, model: str | None = None
 
 @mcp.tool()
 async def jmag_duplicate_study(study: str, new_name: str, model: str | None = None) -> dict:
-    """Copy a study with all settings, without results (good for variants: mesh refinement, other operating point)."""
+    """Copy a study with every setting (conditions, circuit, mesh, step control) but no results. Use it for variants
+    (mesh refinement, another operating point) so the base study stays clean. new_name must be new: an existing name is
+    refused before JMAG is touched (hint: another name or jmag_delete_study). Returns result.study. Blocks up to 300 s.
+    """
     return await run_op("duplicate_study", 300, study=study, new_name=new_name, model=model)
 
 
 @mcp.tool()
 async def jmag_delete_study(study: str, model: str | None = None) -> dict:
-    """Delete a study and its results."""
+    """Delete a study and its results; there is no undo. Refused while a solve runs. Duplicate first
+    (jmag_duplicate_study) if you may want it back. Returns result.deleted. Blocks up to 120 s.
+    """
     return await run_op("delete_study", 120, study=study, model=model)
 
 
@@ -340,10 +455,13 @@ async def jmag_get_properties(study: str, kind: str = "study", name: str | None 
 @mcp.tool()
 async def jmag_set_properties(study: str, values: dict, kind: str = "study", name: str | None = None,
                               index: int | None = None, strict: bool = True, model: str | None = None) -> dict:
-    """Set properties with read-back verification. Same targets as jmag_get_properties.
-
-    values: {"ModelThickness": 50} | {"Turn": "N_turns"} (equation name/expression) | {"X": {"value": 3, "unit": "mm"}}.
-    Unknown names are rejected with closest matches. Examples: stack length -> kind='study', {'ModelThickness': 50};
+    """Set properties on a study, step, mesh, condition, sub-condition, circuit component or material, with read-back.
+    Values are in JMAG's units for the property (mm, s, deg, rpm, A, V) unless given as {"value": 3, "unit": "mm"};
+    strings are equation names or expressions; lists are tables. kind picks the target as in jmag_get_properties
+    (name= for conditions, components and materials (part), index= for sub-conditions). strict=True (default) rejects
+    unknown names and lists the closest ones before anything is set.
+    Returns result.applied: {name: {set, read, type[, unit][, mismatch: true]}}; mismatch means JMAG kept a different
+    value than requested: treat it as a failure. Examples: stack length -> kind='study', {'ModelThickness': 50};
     multi-core -> {'UseMultiCPU': 1, 'MultiCPU': 8}; nonlinear -> {'NonlinearMaxIteration': 50}.
     """
     target = {"study": study, "kind": kind, "name": name, "index": index, "model": model}
@@ -354,9 +472,12 @@ async def jmag_set_properties(study: str, values: dict, kind: str = "study", nam
 @mcp.tool()
 async def jmag_set_step(study: str, steps: int | None = None, time_step: float | None = None, end_time: float | None = None,
                         step_type: int | None = None, model: str | None = None) -> dict:
-    """Transient step control. steps+time_step [s] (StepType 0) or steps+end_time [s] (StepType 1, uniform).
-
-    Rule of thumb: >= 30-60 steps per electrical period; simulate enough periods to reach steady state.
+    """Transient step control. steps + time_step [s] -> StepType 0; steps + end_time [s] without time_step -> StepType 1
+    (uniform); step_type overrides. `steps` is the number of time points including t = 0 (steps - 1 intervals, so
+    the span is (steps - 1) * time_step), which is how the bridge's checks read it.
+    Rule of thumb: >= 30-60 steps per electrical period, enough periods for steady state (jmag_estimate
+    kind='step_plan' gives the arguments). Returns applied and the read-back StepType, Step, TimeStep, EndPoint,
+    StepDivision. JMAG may rewrite step control for motion: use the returned time axis of the results.
     """
     return await run_op("set_step", 120, study=study, steps=steps, time_step=time_step, end_time=end_time,
                         step_type=step_type, model=model)
@@ -364,13 +485,20 @@ async def jmag_set_step(study: str, steps: int | None = None, time_step: float |
 
 @mcp.tool()
 async def jmag_set_equations(study: str, equations: dict, descriptions: dict | None = None, model: str | None = None) -> dict:
-    """Define study parameters/equations, e.g. {"speed": 3000, "freq": "speed/60*poles/2"}. Use their names as property values."""
+    """Define study equations (named parameters): {"speed": 3000, "freq": "speed/60*poles/2"}. Values are numbers or
+    expression strings over other equation names. Use a name afterwards as a property value, e.g.
+    jmag_set_properties(kind='condition', name='Rot', values={"AngularVelocity": "speed"}); the property that uses it
+    fixes the unit (rpm, mm, A ...). descriptions={name: text} is optional. Equations named poles (or p) also let the
+    checks derive the electrical frequency. Verify with jmag_get_equations. Blocks up to 120 s.
+    """
     return await run_op("set_equations", 120, study=study, equations=equations, descriptions=descriptions, model=model)
 
 
 @mcp.tool()
 async def jmag_get_equations(study: str, model: str | None = None) -> dict:
-    """List study equations with expression and evaluated value."""
+    """List a study's equations: name, type, expression, evaluated value and description, plus the design-table
+    parameter names. Blocks up to 60 s. Use it to confirm that names set with jmag_set_equations evaluate as intended.
+    """
     return await run_op("get_equations", 60, study=study, model=model)
 
 
@@ -378,7 +506,11 @@ async def jmag_get_equations(study: str, model: str | None = None) -> dict:
 
 @mcp.tool()
 async def jmag_find_materials(query: str = "", limit: int = 40) -> dict:
-    """Search JMAG's material library, e.g. '35JN', 'N42', 'Copper', 'Air', 'SUS'."""
+    """Search JMAG's material library by name fragment, e.g. '35JN', 'N42', 'Copper', 'Air', 'SUS' (case-insensitive;
+    fuzzy matches when nothing contains the text). Returns count, materials (up to `limit`, default 40) and
+    library_size; an empty query lists the library from the start. Copy the exact name into jmag_set_material; for a
+    material that is not in the library use jmag_create_material. Blocks up to 180 s.
+    """
     return await run_op("find_materials", 180, query=query, limit=limit)
 
 
@@ -448,12 +580,12 @@ async def jmag_create_material(name: str, bh: list | None = None, density: float
 @mcp.tool()
 async def jmag_set_material(study: str, parts: list, material: str, properties: dict | None = None,
                             orientation: dict | None = None, model: str | None = None) -> dict:
-    """Assign a library material to parts (names, ids or [x,y] points), verified by read-back.
-
-    properties: material settings e.g. {"Laminated": 1, "LaminationFactor": 98, "EddyCurrentCalculation": 0}.
-    orientation (magnets): {"pattern": "Radial", "outward": true} for radially magnetised arcs (alternate outward/inward
-    per pole), or {"pattern": "Parallel", "direction": [x,y,z]}; also "origin", "axis". The response lists valid patterns.
-    the response lists valid patterns. Verify magnetization afterwards with a contour image.
+    """Assign a library material to parts (names, ids or [x, y] points), verified by read-back.
+    properties: material settings, e.g. {"Laminated": 1, "LaminationFactor": 98 (percent), "EddyCurrentCalculation": 0}.
+    orientation (magnets): {"pattern": "Radial", "outward": true} for radially magnetised arcs (alternate outward /
+    inward per pole), or {"pattern": "Parallel", "direction": [x, y, z]}; optional "origin", "axis". The response lists
+    the valid patterns. Verify the magnetisation afterwards with a contour image (jmag_field_plot or
+    jmag_contour_image).
     """
     return await run_op("set_material", 300, study=study, parts=parts, material=material, properties=properties,
                         orientation=orientation, model=model)
@@ -464,9 +596,11 @@ async def jmag_set_material(study: str, parts: list, material: str, properties: 
 @mcp.tool()
 async def jmag_add_current(study: str, name: str, parts: list, turns: float, current: float, direction: str = "up",
                            replace: bool = False, model: str | None = None) -> dict:
-    """Static-study coil excitation ('Current' condition): total ampere-turns = turns*current through the parts.
-
-    direction 'up' = +z (out of the 2D plane), 'down' = -z. A coil's go and return sides need opposite directions.
+    """Coil excitation for STATIC studies ('Current' condition): `turns` [-] and `current` [A, DC] give ampere-turns =
+    turns * current through `parts`. direction 'up' = +z (out of the 2D plane), 'down' = -z; a coil's go and return
+    sides need opposite directions. No circuit and no AC: for time-varying current use a Transient study with
+    jmag_circuit_quick + jmag_add_fem_coil. 3D Current conditions need face selection (jmag-simulation
+    references/static-3d-basics.md). replace=True overwrites a condition of that name.
     """
     return await run_op("add_current", 120, study=study, name=name, parts=parts, turns=turns, current=current,
                         direction=direction, replace=replace, model=model)
@@ -498,10 +632,13 @@ async def jmag_add_fem_conductor(study: str, name: str, component: str, conducto
 @mcp.tool()
 async def jmag_add_condition(study: str, condition_type: str, name: str, parts: list | None = None,
                              properties: dict | None = None, replace: bool = False, model: str | None = None) -> dict:
-    """Any other condition: RotationMotion, Torque, Force, RotationPeriodicBoundary, SymmetryBoundary, EddyCurrent, Slide ...
-
-    Unknown property names are rejected with suggestions; list them with jmag_get_properties(kind='condition').
-    Examples: RotationMotion {"AngularVelocity": 3000} (rpm) on rotor parts; Torque on rotor parts.
+    """Any other condition: RotationMotion, Torque, Force, RotationPeriodicBoundary, SymmetryBoundary, EddyCurrent,
+    Slide ... on `parts` (names, ids or [x, y] points).
+    Units: RotationMotion AngularVelocity [rpm]; lengths mm; angles deg. Unknown property names are rejected with
+    suggestions; list valid ones with jmag_get_properties(kind='condition', name=...).
+    Returns result.condition (name, type, parts, link, properties), result.applied (as jmag_set_properties) and
+    result.parts. replace=True overwrites a same-named condition; otherwise a name clash is an error.
+    Examples: RotationMotion {"AngularVelocity": 3000} on the rotor parts; Torque on the rotor parts.
     """
     return await run_op("add_condition", 120, study=study, condition_type=condition_type, name=name, parts=parts,
                         properties=properties, replace=replace, model=model)
@@ -509,13 +646,19 @@ async def jmag_add_condition(study: str, condition_type: str, name: str, parts: 
 
 @mcp.tool()
 async def jmag_list_conditions(study: str, model: str | None = None) -> dict:
-    """Conditions of a study with parts, links, sub-conditions and properties."""
+    """Conditions of a study: name, type, assigned part ids, circuit link, sub-conditions and property values, plus the
+    condition types the study accepts. Blocks up to 60 s. Use it to verify what a build step really created and to find
+    the exact name for jmag_delete_condition or jmag_set_properties(kind='condition', name=...).
+    """
     return await run_op("list_conditions", 60, study=study, model=model)
 
 
 @mcp.tool()
 async def jmag_delete_condition(study: str, name: str, model: str | None = None) -> dict:
-    """Delete a condition."""
+    """Delete one condition by name (an unknown name is an error listing the existing ones). Refused while a solve
+    runs. Deleting a FEM coil condition does not remove its circuit Coil component (unverified; check with
+    jmag_circuit_summary). Blocks up to 60 s.
+    """
     return await run_op("delete_condition", 60, study=study, name=name, model=model)
 
 
@@ -524,12 +667,16 @@ async def jmag_delete_condition(study: str, name: str, model: str | None = None)
 @mcp.tool()
 async def jmag_circuit_quick(study: str, topology: str, coils: list[dict], source: dict, probe: bool = True,
                              model: str | None = None) -> dict:
-    """Build a standard, correctly wired circuit.
-
-    topology: current_source | voltage_source (one coil) | three_phase_current | three_phase_voltage (U,V,W star, grounded neutral).
-    coils=[{"name": "CoilU", "turns": 24, "resistance": 0.05}, ...]
-    source={"type": "sin"|"constant", "amplitude": 10, "frequency": 50, "phase": 0}  (A or V, Hz, deg)
-    Then link each coil with jmag_add_fem_coil(component=<coil name>). Check with jmag_circuit_image.
+    """Build a standard, correctly wired circuit in a Transient/Frequency study whose circuit is EMPTY.
+    topology: current_source | voltage_source (one coil) | three_phase_current | three_phase_voltage (coils U, V, W,
+    star, grounded neutral).
+    coils=[{"name": "CoilU", "turns": 24, "resistance": 0.05}, ...]: turns are series turns PER PHASE (not per slot
+    coil); resistance in ohm per phase.
+    source={"type": "sin"|"constant", "amplitude": 10, "frequency": 50, "phase": 0}: amplitude is the PEAK value of
+    the sine (A or V; convert rms first, jmag_units), frequency Hz, phase deg (PhaseU for 3-phase sources).
+    probe=True (one-coil topologies only) adds a VoltageProbe VP_<coil> across the coil, which jmag_physics_check(kvl)
+    picks up by itself; the 3-phase topologies get no probes.
+    Next: jmag_add_fem_coil(component=<coil name>), then jmag_circuit_image.
     """
     return await run_op("circuit_quick", 120, study=study, topology=topology, coils=coils, source=source, probe=probe,
                         model=model)
@@ -551,13 +698,19 @@ async def jmag_circuit_add(study: str, components: list[dict] | None = None, wir
 
 @mcp.tool()
 async def jmag_circuit_summary(study: str, model: str | None = None) -> dict:
-    """Circuit components with properties, wire count and the terminal-offset table."""
+    """Circuit of a Transient/Frequency study: components (name, type, properties), wire count and the
+    terminal-offset table used by jmag_circuit_add; {has_circuit: false} when the study has none (Static studies never
+    do in JMAG 23). Blocks up to 60 s.
+    """
     return await run_op("circuit_summary", 60, study=study, model=model)
 
 
 @mcp.tool()
 async def jmag_circuit_image(study: str, path: str | None = None, model: str | None = None) -> list:
-    """Render the study circuit to an image to verify wiring visually."""
+    """Render the study circuit to a PNG for a visual wiring check; do it after every jmag_circuit_quick or
+    jmag_circuit_add. path: output file (default: under the bridge outputs). Returns result.path and the image.
+    Blocks up to 120 s.
+    """
     return with_image(await run_op("circuit_image", 120, study=study, path=out_path("circuit", path), model=model))
 
 
@@ -565,13 +718,22 @@ async def jmag_circuit_image(study: str, path: str | None = None, model: str | N
 
 @mcp.tool()
 async def jmag_mesh(study: str, model: str | None = None) -> dict:
-    """Generate the mesh now (fails loudly on bad geometry) and report element/vertex counts."""
+    """Generate the mesh now and report element and vertex counts; fails loudly on bad geometry. Does not run the solver.
+    Refused while a solve runs. Look at it with jmag_model_image(show_mesh=true); refine locally with jmag_mesh_size.
+    BLOCKING_TOOLS: blocks up to 3600 s (fine 3D meshes). There is no wait_seconds / background mode (unlike
+    jmag_run); if your client's tool timeout is shorter, the call is cut off client-side while JMAG keeps meshing -
+    wait, then check with jmag_summary before calling it again. A bridge-side timeout restarts the worker: call
+    jmag_connect again.
+    """
     return await run_op("mesh", 3600, study=study, model=model)
 
 
 @mcp.tool()
 async def jmag_mesh_size(study: str, parts: list, size: float, name: str | None = None, model: str | None = None) -> dict:
-    """Local mesh size (model length unit) on parts, e.g. air-gap bands, magnets, thin bridges."""
+    """Local mesh size on parts: `size` is a length in the MODEL unit (mm), e.g. 0.3 for an air-gap band. Creates a mesh
+    size condition named `name` (default 'size_<parts>'). Use it on the air gap, magnets and thin bridges, then judge
+    the effect with a mesh-convergence comparison (jmag_compare of a refined copy), not one run. Blocks up to 120 s.
+    """
     return await run_op("mesh_size", 120, study=study, parts=parts, size=size, name=name, model=model)
 
 
@@ -581,12 +743,21 @@ async def _facts(study: str, model: str | None) -> dict:
     return await run_op("study_facts", 120, study=study, model=model)
 
 
-async def _post(study: str, model: str | None, electrical_frequency_hz: float | None, run_env: dict | None = None) -> dict:
+async def _post(study: str, model: str | None, electrical_frequency_hz: float | None, run_env: dict | None = None,
+                record: bool = True) -> dict:
+    """Post-run health check. record=True marks the study's post-check as done in VERIFY (jmag_check post and a
+    finished jmag_run_status show the verdict to the caller; jmag_make_report does not count)."""
     rep = await run_op("report", 120, study=study, model=model)
     info = dict(rep.get("result") or {})
     if run_env and run_env.get("result"):
         info.update({k: v for k, v in run_env["result"].items() if k in ("errors", "warnings", "has_result")})
     facts = (await _facts(study, model)).get("result") or {}
+    derived = None
+    if electrical_frequency_hz is None and facts:
+        derived = health.derive_electrical_frequency(facts)
+        electrical_frequency_hz = derived["hz"] if derived else None
+    torque_cond = (any(c.get("type") in ("Torque", "Torque_Surface", "LorentzTorque") for c in facts.get("conditions", []))
+                   if facts.get("conditions") is not None else None)
     conv = None
     if info.get("calc_folder"):
         conv = solver_monitor.convergence(info["calc_folder"], facts.get("nonlinear_max_iteration"))
@@ -597,15 +768,21 @@ async def _post(study: str, model: str | None, electrical_frequency_hz: float | 
             r = await run_op("get_result", 300, study=study, table=t["index"], model=model)
             if r["ok"]:
                 tables[t["title"]] = r["result"]
-    findings = health.postflight(info, conv, tables, electrical_frequency_hz, (facts.get("step") or {}).get("Step"))
+    findings = health.postflight(info, conv, tables, electrical_frequency_hz, (facts.get("step") or {}).get("Step"),
+                                 has_torque_condition=torque_cond)
+    if derived:
+        findings.append({"level": "info", "code": "FE_DERIVED",
+                         "message": f"electrical frequency {derived['hz']:.6g} Hz taken from {derived['source']}",
+                         "fix": "pass electrical_frequency_hz explicitly if this is not the electrical frequency"})
     summary = {title: {col: _round(health.waveform_stats(v)) for col, v in tb["columns"].items()}
                for title, tb in tables.items()}
-    return {"health": health.summarize(findings), "convergence": conv, "result_summary": summary,
+    verdict = health.summarize(findings)
+    if record and info.get("has_result"):
+        VERIFY.mark_post(study, verdict["verdict"])
+    return {"health": verdict, "convergence": conv, "result_summary": summary,
             "calc_folder": info.get("calc_folder")}
 
 
-def _round(d: dict, n: int = 6) -> dict:
-    return {k: (float(f"{v:.{n}g}") if isinstance(v, float) else v) for k, v in d.items()}
 
 
 @mcp.tool()
@@ -615,16 +792,28 @@ async def jmag_check(study: str, stage: str = "pre", electrical_frequency_hz: fl
 
     stage='pre': lint the setup (materials, stack length, excitation, circuit links/sources/ground, coil directions,
     turns, step resolution vs electrical_frequency_hz, mesh). stage='post': solver errors/warnings, nonlinear
-    convergence per step, NaN/zero results, steady-state periodicity, waveform summaries.
-    Verdict PASS / CHECK (warnings) / FAIL (errors). Fix errors before trusting any number.
+    convergence per step, NaN/zero results, zero/flat torque, steady-state periodicity, waveform summaries.
+    electrical_frequency_hz (= poles/2 * rpm/60): when omitted it is derived from the RotationMotion speed plus a
+    'poles'/'p' study equation or a 3-phase source Frequency (finding FE_DERIVED); otherwise the step checks are
+    skipped (finding STEP_CHECKS_SKIPPED) - pass it.
+    ok=true means the check ran. The physics verdict is result.verdict: PASS / CHECK (warnings) / FAIL (errors),
+    result.passed = no error finding, result.hint = the fixes to apply. Fix errors before trusting any number.
+    (stage, verdict, counts, findings for 'pre' and health/convergence/result_summary for 'post' are also kept at
+    the top level as before.)
     """
+    t0 = time.time()
     if stage == "pre":
         f = await _facts(study, model)
         if not f["ok"]:
             return f
-        findings = health.preflight(f["result"], electrical_frequency_hz)
-        return {"ok": True, "stage": "pre", **health.summarize(findings)}
-    return {"ok": True, "stage": "post", **await _post(study, model, electrical_frequency_hz)}
+        summ = health.summarize(health.preflight(f["result"], electrical_frequency_hz))
+        return {"ok": True, "stage": "pre", **summ, "result": {"stage": "pre", **sup.check_verdict(summ)},
+                "seconds": round(time.time() - t0, 3)}
+    if stage != "post":
+        return wrap(ok=False, t0=t0, error={"message": f"unknown stage {stage!r}", "hint": "stage='pre' or 'post'"})
+    post = await _post(study, model, electrical_frequency_hz)
+    return {"ok": True, "stage": "post", **post, "result": {"stage": "post", **sup.check_verdict(post["health"])},
+            "seconds": round(time.time() - t0, 3)}
 
 
 # =========================================================================== run
@@ -683,6 +872,7 @@ async def jmag_run(study: str, wait_seconds: float = 120, overwrite: bool = True
 
     job = {"id": uuid.uuid4().hex[:8], "study": study, "model": model, "started": time.time(), "done": False,
            "runner": runner, "folder": folder, "total_steps": total_steps, "freq": electrical_frequency_hz, "precheck": pre}
+    VERIFY.invalidate(study)   # the study gets new results: earlier post/physics checks no longer apply
     loop = asyncio.get_running_loop()
     fut = loop.run_in_executor(None, work)
     job["future"] = fut
@@ -703,10 +893,14 @@ async def jmag_run_status() -> dict:
     ok is true while the solve runs and when it finished with results; false when it failed, and also when JMAG's
     messages say the solver aborted (solver_aborted=true, e.g. "The solver module jam was aborted", "jam.exe failed to
     execute", "Size of point array is zero") even if the study still reports results: treat them as unusable.
+
+    No run started by this bridge (after a server restart, or a solve started in the GUI): returns state='running'
+    with owned=false when a solver process or a 'Run Analysis' window exists (ok=true), else ok=false with
+    state='none'; both carry solver_processes, newest_monitor_age_s and stalled (see jmag_status).
     """
     job = B.job
     if not job:
-        return {"ok": False, "error": {"message": "no run started in this session"}}
+        return await _unowned_run_status()
     if job.get("kind") == "cases":  # jmag_run_cases job (advanced section below)
         return await _run_cases_status(job)
     elapsed = (job.get("finished") or time.time()) - job["started"]
@@ -756,21 +950,27 @@ async def jmag_run_status() -> dict:
     return st
 
 
-@mcp.tool()
-async def jmag_cancel_run() -> dict:
-    """Stop the running solve safely.
+async def _unowned_run_status() -> dict:
+    """jmag_run_status when this bridge holds no job: report solves it does not own."""
+    st: dict = {"owned": False, **await _solver_status()}
+    windows = await asyncio.to_thread(winui.dialogs, "Run Analysis")
+    st["run_analysis_window"] = bool(windows)
+    if windows:
+        st["jmag_progress_window"] = winui.parse_progress(windows[0].get("text", ""))
+    if st["solver_processes"] or windows:
+        st.update(ok=True, state="running",
+                  hint="a solve is running that this bridge did not start (server restart or GUI run): wait and "
+                       "poll jmag_run_status / jmag_status; stop it only with jmag_cancel_run"
+                       + ("; stalled=true: check jmag_dialogs and jmag_screenshot" if st.get("stalled") else ""))
+        return st
+    st.update(ok=False, state="none", error={"message": "no run started in this session and no solver is running",
+                                             "hint": "start one with jmag_run"})
+    return st
 
-    Protocol (verified on JMAG 23): press Abort in the 'Run Analysis' window -> answer the 'Stop calculation' prompt
-    -> if the solver process is still alive after 10 s, terminate the ExecSolver/jam tree -> release the runner.
-    Killing the solver *before* answering JMAG's prompt can take Designer down, hence this order.
-    The study is left without results; re-run it after fixing whatever made you cancel.
-    """
-    job = B.job
-    if not job or job.get("done"):
-        return {"ok": False, "error": {"message": "nothing is running"}}
-    if job.get("kind") == "cases":  # stop starting new cases; kill target = current case folder
-        _cases_cancel_prepare(job)
-    steps: list[str] = []
+
+async def _abort_protocol(folder: str | None, steps: list[str]) -> None:
+    """The verified stop order: Abort in 'Run Analysis' -> answer 'Stop calculation' -> wait up to 10 s for the
+    solver -> only then terminate the ExecSolver/jam tree working in `folder`. Appends what it did to steps."""
     r = await asyncio.to_thread(winui.click, "Abort", "Run Analysis", 3.0)
     if r.get("clicked"):
         steps.append("pressed Abort")
@@ -780,7 +980,6 @@ async def jmag_cancel_run() -> dict:
                 steps.append("answered 'Yes, and open results'")
                 break
             await asyncio.sleep(0.5)
-    folder = job.get("folder")
     for _ in range(20):
         if not await asyncio.to_thread(solver_monitor.solver_processes, folder):
             break
@@ -788,6 +987,26 @@ async def jmag_cancel_run() -> dict:
     else:
         killed = await asyncio.to_thread(solver_monitor.kill_solver, folder)
         steps.append(f"terminated solver processes {killed}")
+
+
+@mcp.tool()
+async def jmag_cancel_run() -> dict:
+    """Stop the running solve safely.
+
+    Protocol (verified on JMAG 23): press Abort in the 'Run Analysis' window -> answer the 'Stop calculation' prompt
+    -> if the solver process is still alive after 10 s, terminate the ExecSolver/jam tree -> release the runner.
+    Killing the solver *before* answering JMAG's prompt can take Designer down, hence this order.
+    The study is left without results; re-run it after fixing whatever made you cancel.
+    No bridge-owned run (server restart, GUI-started solve) but a 'Run Analysis' window is open: the same
+    protocol runs; the solver tree is only killed when exactly one solver calc folder is found (unverified live).
+    """
+    job = B.job
+    if not job or job.get("done"):
+        return await _cancel_unowned()
+    if job.get("kind") == "cases":  # stop starting new cases; kill target = current case folder
+        _cases_cancel_prepare(job)
+    steps: list[str] = []
+    await _abort_protocol(job.get("folder"), steps)
     for _ in range(60):
         if job.get("done"):
             break
@@ -803,16 +1022,51 @@ async def jmag_cancel_run() -> dict:
             "hint": "if dialogs_left is not empty, inspect/close them with jmag_dialogs"}
 
 
+async def _cancel_unowned() -> dict:
+    """jmag_cancel_run without a bridge-owned job (unverified live): run the abort protocol on a GUI/orphan solve."""
+    windows = await asyncio.to_thread(winui.dialogs, "Run Analysis")
+    if not windows:
+        return {"ok": False, "error": {"message": "nothing is running (no bridge job and no 'Run Analysis' window)",
+                                       "hint": "jmag_status lists solver_processes; nothing to cancel"}}
+    status = await _solver_status()
+    folders = status.get("calc_folders") or []
+    steps: list[str] = ["no bridge-owned run: using the 'Run Analysis' window (unverified live path)"]
+    if len(folders) == 1:
+        await _abort_protocol(folders[0], steps)
+    else:  # never kill solvers of an unknown folder: they may belong to another JMAG instance
+        r = await asyncio.to_thread(winui.click, "Abort", "Run Analysis", 3.0)
+        if r.get("clicked"):
+            steps.append("pressed Abort")
+            for _ in range(10):
+                a = await asyncio.to_thread(winui.click, "Yes, and open results", "Stop calculation", 20.0)
+                if a.get("clicked"):
+                    steps.append("answered 'Yes, and open results'")
+                    break
+                await asyncio.sleep(0.5)
+        steps.append(f"solver tree not killed: {len(folders)} calc folders found ({folders}); "
+                     "check jmag_status.solver_processes")
+    leftover = await asyncio.to_thread(winui.dialogs)
+    return {"ok": True, "steps": steps, "dialogs_left": leftover, "unverified_live": True,
+            "hint": "confirm with jmag_status that solver_processes is empty; inspect dialogs_left with jmag_dialogs"}
+
+
 @mcp.tool()
 async def jmag_cleanup() -> dict:
     """Kill orphaned JMAG helper processes (Geometry Editor 'modeller.exe' left behind by Designer instances that
     exited) and report solver processes. Safe: only touches helpers whose parent Designer no longer exists."""
-    return await asyncio.to_thread(solver_monitor.cleanup_orphans)
+    t0 = time.time()
+    try:
+        return wrap(await asyncio.to_thread(solver_monitor.cleanup_orphans), t0=t0)
+    except (OSError, subprocess.SubprocessError) as e:
+        return wrap(ok=False, t0=t0, error={"message": f"process listing failed: {e}",
+                                             "hint": "run it again; if it keeps failing use Task Manager"})
 
 
 @mcp.tool(annotations=READ_ONLY)
 async def jmag_solver_report(study: str, model: str | None = None) -> dict:
-    """Solver report of a study: errors, warnings (e.g. nonlinear non-convergence), element count, calc folder."""
+    """Solver report of a study: errors, warnings (e.g. nonlinear non-convergence), element count and the calculation
+    folder. Blocks up to 120 s. First stop when a run aborted or a result table is empty.
+    """
     return await run_op("report", 120, study=study, model=model)
 
 
@@ -843,16 +1097,26 @@ async def jmag_list_results(study: str, case: int | None = None, model: str | No
 
 @mcp.tool()
 async def jmag_get_result(study: str, table: str, columns: list[str] | None = None, electrical_frequency_hz: float | None = None,
-                          max_points: int = 120, case: int | None = None, model: str | None = None) -> dict:
+                          max_points: int = 120, case: int | None = None, model: str | None = None,
+                          n_harmonics: int = 10) -> dict:
     """One result table with statistics (mean, rms, min, max, pk-pk, ripple) and, if electrical_frequency_hz is given,
     harmonics/THD over the last electrical period. table = display name ('Torque', 'Coil Flux-Linkage') or JMAG key
     ('FEMCoilFlux', 'LineCurrent', 'TerminalVoltage'). Series are downsampled to max_points (use jmag_export_results for all).
+    last_period.harmonic_amplitudes: PEAK amplitudes, index k = order k of the electrical frequency ([0] = DC,
+    [1] = fundamental), over the last full electrical period (endpoint excluded). n_harmonics: their count =
+    orders 0 .. n_harmonics-1 (default 10 -> orders 0-9, max 64; also limited by samples per period / 2). A
+    harmonic above the limit is not reported, not zero. periodicity compares the last two periods (steady flag).
     case: design-table case index (0-based) to read instead of the current case (refused while a solve runs).
     Loss-study tables have x_name 'frequency' (Hz).
+    result.unverified lists the checks not yet run on this study's current results this session
+    ("post-check" = jmag_check(stage='post'), "physics-check" = jmag_physics_check); [] when both ran.
     """
     busy = _case_busy(case)
     if busy:
         return busy
+    if not isinstance(n_harmonics, int) or isinstance(n_harmonics, bool) or not 1 <= n_harmonics <= 64:
+        return _bad_input(ValueError(f"n_harmonics must be an integer 1..64, got {n_harmonics!r}"),
+                          "use the default 10 (orders 0-9) or up to 64")
     env = await run_op("get_result", 300, study=study, table=table, columns=columns, case=case, model=model)
     if not env["ok"]:
         return env
@@ -863,11 +1127,11 @@ async def jmag_get_result(study: str, table: str, columns: list[str] | None = No
         s = _round(health.waveform_stats(ys))
         if electrical_frequency_hz and r["x_name"] == "time" and len(x) > 4:
             px, py = health.last_period(x, ys, 1.0 / electrical_frequency_hz)
-            h = health.harmonics(py)
+            h = health.harmonics(py, orders=max(15, n_harmonics - 1))
             if h:
                 s["last_period"] = {"mean": sum(py) / len(py), "fundamental": h["fundamental"],
                                     "thd_pct": h.get("thd_pct"),  # None for DC-dominant tables (torque): harmonics() omits it
-                                    "harmonic_amplitudes": [float(f"{a:.4g}") for a in h["amplitudes"][:10]]}
+                                    "harmonic_amplitudes": [float(f"{a:.4g}") for a in h["amplitudes"][:n_harmonics]]}
             p = health.periodicity(x, ys, 1.0 / electrical_frequency_hz)
             if p:
                 s["periodicity"] = p
@@ -875,14 +1139,22 @@ async def jmag_get_result(study: str, table: str, columns: list[str] | None = No
     stride = max(1, len(x) // max_points)
     env["result"] = {"table": r["table"], "unit": r["unit"], "x_name": r["x_name"], "x_unit": r["x_unit"],
                      "rows": len(x), "stats": stats, "stride": stride, "x": x[::stride],
-                     "series": {c: v[::stride] for c, v in r["columns"].items()}}
+                     "series": {c: v[::stride] for c, v in r["columns"].items()},
+                     "unverified": VERIFY.unverified(study, case)}
     return env
 
 
 @mcp.tool()
 async def jmag_export_results(study: str, out_dir: str, tables: list[str] | None = None, model: str | None = None) -> dict:
-    """Export result tables to CSV files (one per table, x column + data columns) for post-processing outside JMAG."""
-    return await run_op("export_results", 900, study=study, out_dir=out_dir, tables=tables, model=model)
+    """Export result tables to CSV, one file per table (x column plus data columns), into out_dir.
+    tables: table names or titles as jmag_list_results shows them (default: all). Full resolution; use jmag_get_result
+    for statistics and downsampled series. result.unverified lists the checks (post-check, physics-check) not yet run
+    on these results this session. Blocks up to 900 s.
+    """
+    env = await run_op("export_results", 900, study=study, out_dir=out_dir, tables=tables, model=model)
+    if env.get("ok") and isinstance(env.get("result"), dict):
+        env["result"]["unverified"] = VERIFY.unverified(study)
+    return env
 
 
 @mcp.tool()
@@ -905,24 +1177,8 @@ RENDER_HINT = ('the field renderer failed inside matplotlib; field plots need ma
                'pip install -U "jmag-agent-suite[plots]"')
 
 
-def _sig(v: Any, n: int = 6) -> Any:
-    """Round floats (also inside dicts/lists) to n significant digits for compact envelopes."""
-    if isinstance(v, float):
-        return float(f"{v:.{n}g}") if v == v and abs(v) != float("inf") else None
-    if isinstance(v, dict):
-        return {k: _sig(x, n) for k, x in v.items()}
-    if isinstance(v, (list, tuple)):
-        return [_sig(x, n) for x in v]
-    return v
 
 
-def _field_quantities(names: list[str]) -> list[str]:
-    out = []
-    for q in names:
-        fielddata.parse_quantity(q)      # raises FieldDataError with a hint
-        if q not in out:
-            out.append(q)
-    return out
 
 
 async def _load_field(study: str | None, step: int | None, quantities: list[str], case: int | None,
@@ -984,12 +1240,6 @@ def _save_field(data: dict, entry: dict | None, out: str | None = None) -> str:
     return path
 
 
-def _field_summary(data: dict) -> dict:
-    return {"nodes": len(data["nodes"]), "elements": len(data["elements"]), "parts": data["parts"],
-            "part_materials": data.get("part_materials"), "step": data.get("step"), "time": data.get("time"),
-            "case": data.get("case"), "length_unit": data.get("length_unit"),
-            "solved_steps": (data.get("source") or {}).get("solved_steps"),
-            "available_steps": data.get("available_steps")}
 
 
 @mcp.tool(annotations=READ_ONLY)
@@ -1047,21 +1297,6 @@ async def jmag_field_data(study: str, step: int | None = None, quantities: list[
     return {"ok": True, "result": res, **({"seconds": env["seconds"]} if env.get("seconds") is not None else {})}
 
 
-def _visible_parts(data: dict, parts: list[str] | None, hide_air: bool) -> list[str] | None:
-    """Parts to draw. An explicit `parts` list wins over hide_air (so an air part can be asked for by name);
-    unknown names raise ValueError listing the valid ones."""
-    used = set(data["element_part"])
-    names = [p for k, p in enumerate(data["parts"]) if k in used]
-    if parts is not None:
-        parts = [parts] if isinstance(parts, str) else list(parts)
-        unknown = [p for p in parts if p not in names]
-        if unknown:
-            raise ValueError(f"parts {unknown} not in the field data; parts with elements: {names}")
-        return parts
-    if not hide_air:
-        return None
-    mats = data.get("part_materials") or [""] * len(data["parts"])
-    return [p for k, (p, m) in enumerate(zip(data["parts"], mats)) if k in used and (m or "").lower() != "air"]
 
 
 @mcp.tool(annotations=READ_ONLY)
@@ -1126,33 +1361,6 @@ async def jmag_field_plot(study: str | None = None, step: int | None = None, qua
     return with_image({"ok": True, "result": res})
 
 
-def _probe_harmonics(values: list, pole_pairs: int | None) -> dict | None:
-    if any(v is None for v in values):
-        return None
-    n = len(values)
-    p = int(pole_pairs) if pole_pairs else None
-    h = health.harmonics(values, orders=min(n // 2, max(40, 15 * (p or 1))))
-    amps = h.get("amplitudes") or []
-    if len(amps) < 3:
-        return None
-    top = sorted(range(1, len(amps)), key=lambda k: amps[k], reverse=True)[:6]
-    out: dict = {"dc": h["dc"], "top_orders": [[k, amps[k]] for k in top], "order_basis": "mechanical (per revolution)"}
-    if p:
-        fund = amps[p] if p < len(amps) else 0.0
-        el = {k // p: amps[k] for k in range(p, len(amps), p)}
-        out.update({"pole_pairs": p, "fundamental": fund, "fundamental_order": p,
-                    "electrical_harmonics": {str(k): a for k, a in list(el.items())[:15]}})
-        if fund > 0:
-            out["thd_pct"] = math.sqrt(sum(a * a for k, a in el.items() if k >= 2)) / fund * 100
-        sub = [[k, amps[k]] for k in range(1, len(amps)) if k % p and amps[k] > 0.01 * fund]
-        if sub:
-            out["non_multiple_orders"] = sub[:8]    # sub-harmonics / non-multiples of p: asymmetry, slotting
-    else:
-        k1 = top[0]
-        out.update({"fundamental": amps[k1], "fundamental_order": k1})
-        if amps[k1] > 0:
-            out["thd_pct"] = math.sqrt(sum(amps[k] ** 2 for k in range(2 * k1, len(amps), k1))) / amps[k1] * 100
-    return out
 
 
 @mcp.tool(annotations=READ_ONLY)
@@ -1263,12 +1471,47 @@ async def jmag_physics_check(study: str, check: str, coil: str | None = None, pr
     check='energy' (static Current conditions or FEM coils): W ~= 1/2 sum(i*psi) (exact for linear iron;
       a few % off when saturated).
     check='power_balance' (rotating machine, transient): mean(sum i*dpsi/dt) over the last electrical period
-      = mean(torque)*omega (+ eddy losses). Needs speed_rpm and electrical_frequency_hz. Proves torque, flux
-      linkage, winding layout and motion agree with each other.
+      = mean(torque)*omega (+ eddy losses). Proves torque, flux linkage, winding layout and motion agree.
+    Omitted arguments are taken from the study (explicit ones always win; result.defaults_used says which):
+      speed_rpm = RotationMotion AngularVelocity; electrical_frequency_hz from a 'poles'/'p' equation or the
+      3-phase source Frequency (as jmag_check); coil = the only circuit Coil, probe = VP_<coil> (jmag_circuit_quick)
+      or the only VoltageProbe, resistance = that Coil's Resistance. So jmag_physics_check(study, 'power_balance')
+      is one call for a standard PMSM transient study.
+    Envelope: ok=true means the check ran. result.passed / result.verdict (PASS | FAIL) say whether the physics held;
+    a failed invariant is ok=true, passed=false with result.hint naming the likely causes.
     """
+    t0 = time.time()
+    if check not in ("kvl", "energy", "power_balance"):
+        return wrap(ok=False, t0=t0, error={"message": f"unknown check {check!r}", "hint": "kvl | energy | power_balance"})
+    defaults: dict = {}
+    need_kvl = check == "kvl" and not (coil and probe and resistance is not None)
+    need_pb = check == "power_balance" and not (speed_rpm and electrical_frequency_hz)
+    if need_kvl or need_pb:
+        f = await _facts(study, model)
+        if f.get("ok"):
+            vals, defaults = sup.physics_defaults(f["result"], check, coil, probe, resistance, speed_rpm,
+                                                  electrical_frequency_hz)
+            coil, probe, resistance = vals["coil"], vals["probe"], vals["resistance"]
+            speed_rpm, electrical_frequency_hz = vals["speed_rpm"], vals["electrical_frequency_hz"]
+    res = await _physics(study, check, coil, probe, resistance, speed_rpm, electrical_frequency_hz, model)
+    if not res.get("ok"):
+        return {**res, "seconds": round(time.time() - t0, 3)}
+    body = sup.invariant_verdict(check, res["result"])
+    if defaults:
+        body["defaults_used"] = defaults
+    VERIFY.mark_physics(study, {k: body[k] for k in ("check", "passed", "verdict") if k in body})
+    return wrap(body, t0=t0)
+
+
+async def _physics(study: str, check: str, coil: str | None, probe: str | None, resistance: float | None,
+                   speed_rpm: float | None, electrical_frequency_hz: float | None, model: str | None) -> dict:
+    """{ok, result: health.* invariant dict (with its own "ok" = physics held)} or an error envelope."""
     if check == "kvl":
         if not (coil and probe and resistance is not None):
-            return {"ok": False, "error": {"message": "kvl needs coil, probe and resistance"}}
+            missing = [n for n, v in (("coil", coil), ("probe", probe), ("resistance", resistance)) if v is None]
+            return {"ok": False, "error": {"message": f"kvl needs coil, probe and resistance; could not derive {missing}",
+                                           "hint": "pass them: coil = circuit Coil name, probe = its VoltageProbe, "
+                                                   "resistance = the Coil's Resistance [ohm] (jmag_circuit_summary)"}}
         cur = await run_op("get_result", 300, study=study, table="LineCurrent", columns=[coil], model=model)
         if not cur["ok"]:
             cur = await run_op("get_result", 300, study=study, table="Circuit Current", columns=[coil], model=model)
@@ -1283,7 +1526,7 @@ async def jmag_physics_check(study: str, check: str, coil: str | None = None, pr
                 return e
         res = health.kvl_residual(cur["result"]["x"], cur["result"]["columns"][coil], vol["result"]["columns"][probe],
                                   psi["result"]["columns"][coil], resistance)
-        return {"ok": True, "check": "kvl", **res}
+        return {"ok": True, "result": {"coil": coil, "probe": probe, "resistance_ohm": resistance, **res}}
     if check == "energy":
         lr = await run_op("list_results", 120, study=study, model=model)
         if not lr["ok"]:
@@ -1300,18 +1543,23 @@ async def jmag_physics_check(study: str, check: str, coil: str | None = None, pr
             cols = list(psi["columns"])
             k = len(W) - 1
             res = health.inductance_consistency([psi["columns"][c][k] for c in cols], [cur["columns"][c][k] for c in cols], W[k])
-            return {"ok": True, "check": "energy", "conditions": cols, **res}
+            return {"ok": True, "result": {"conditions": cols, **res}}
         if "Coil Flux-Linkage" in titles:
             psi = (await run_op("get_result", 300, study=study, table="Coil Flux-Linkage", model=model))["result"]
             cur = (await run_op("get_result", 300, study=study, table="Circuit Current", model=model))["result"]
             cols = [c for c in psi["columns"] if c in cur["columns"]]
             k = max(range(len(W)), key=lambda j: abs(W[j]))
             res = health.inductance_consistency([psi["columns"][c][k] for c in cols], [cur["columns"][c][k] for c in cols], W[k])
-            return {"ok": True, "check": "energy", "coils": cols, "at_step_index": k, **res}
-        return {"ok": False, "error": {"message": "no coil flux tables found"}}
+            return {"ok": True, "result": {"coils": cols, "at_step_index": k, **res}}
+        return {"ok": False, "error": {"message": "no coil flux tables found",
+                                       "hint": "energy needs 'Magnetic Flux of Current Condition' (static Current "
+                                               "conditions) or 'Coil Flux-Linkage' (FEM coils); jmag_list_results"}}
     if check == "power_balance":
         if not (speed_rpm and electrical_frequency_hz):
-            return {"ok": False, "error": {"message": "power_balance needs speed_rpm and electrical_frequency_hz"}}
+            return {"ok": False, "error": {
+                "message": "power_balance needs speed_rpm and electrical_frequency_hz; "
+                           f"could not derive {[n for n, v in (('speed_rpm', speed_rpm), ('electrical_frequency_hz', electrical_frequency_hz)) if not v]}",
+                "hint": "pass speed_rpm=<rpm> and electrical_frequency_hz=<poles/2 * rpm/60>"}}
         cur = await run_op("get_result", 300, study=study, table="LineCurrent", model=model)
         psi = await run_op("get_result", 300, study=study, table="FEMCoilFlux", model=model)
         tq = await run_op("get_result", 300, study=study, table="Torque", model=model)
@@ -1323,7 +1571,8 @@ async def jmag_physics_check(study: str, check: str, coil: str | None = None, pr
         res = health.power_balance(cur["result"]["x"], {c: cur["result"]["columns"][c] for c in coils},
                                    {c: psi["result"]["columns"][c] for c in coils}, tq["result"]["columns"][tcol],
                                    speed_rpm, 1.0 / electrical_frequency_hz)
-        return {"ok": True, "check": "power_balance", "coils": coils, "torque_column": tcol, **res}
+        return {"ok": True, "result": {"coils": coils, "torque_column": tcol, "speed_rpm": speed_rpm,
+                                       "electrical_frequency_hz": electrical_frequency_hz, **res}}
     return {"ok": False, "error": {"message": f"unknown check {check!r}", "hint": "kvl | energy | power_balance"}}
 
 
@@ -1356,10 +1605,17 @@ async def jmag_estimate(kind: str, params: dict | None = None) -> dict:
       electrical_frequency {"rpm": 3000, "poles": 10}
       step_plan {"rpm": 3000, "poles": 10, "steps_per_period": 60, "periods": 2, "slots": 12}  -> jmag_set_step args
       iron_loss_steinmetz {"kh": 0.025, "ke": 4e-5, "B": 1.5, "f": 250, "mass_kg": 2.1}
+      dq_to_phase {"id": -20, "iq": 50, "theta_e_deg": 0} -> phase currents U/V/W and a jmag_circuit_quick source
+          {"type": "sin", "amplitude", "phase"} (PhaseU convention unverified live: check i_U(t=0))
+      phase_to_dq {"abc": [ia, ib, ic], "theta_e_deg": 30} -> d, q (amplitude-invariant Park, d axis at theta_e
+          from the phase-U axis; same transform as jmag_experiment's Ld/Lq)
     """
     if kind in ("list", "help"):
-        return {"ok": True, "result": {k: estimate.signature(k) for k in estimate.KINDS}}
+        return {"ok": True, "result": {**{k: estimate.signature(k) for k in estimate.KINDS},
+                                       **{k: dict(v) for k, v in sup.DQ_KINDS.items()}}}
     try:
+        if kind in sup.DQ_KINDS:
+            return {"ok": True, "result": sup.dq_estimate(kind, params)}
         return {"ok": True, "result": estimate.run(kind, params)}
     except (ValueError, TypeError) as e:
         return _bad_input(e, "fix the parameter named in the message; jmag_estimate(kind='list') shows every kind's parameters")
@@ -1423,6 +1679,7 @@ async def jmag_plot(kind: str, data: dict | None = None, csv_path: str | None = 
       csv_path = a CSV with a header row, first column = x (jmag_export_results files work)
       study + table = read a result table from JMAG directly (full resolution, e.g. table='Torque')
     x: use this series as the x axis (sweeps, torque_speed); y: series to plot (default all). out: PNG path.
+    With study=..., result.unverified lists the checks not yet run on that study's results (see jmag_get_result).
     Field plots (kind field / mesh) of a solved study: use jmag_field_plot (study=... or data_path=... of a
     jmag_field_data JSON) - it forwards parts, flux_lines, show_mesh, cmap, vmin, vmax; here they only work with
     data = the field-data dict and default options (y=["B"] selects the quantity).
@@ -1451,23 +1708,11 @@ async def jmag_plot(kind: str, data: dict | None = None, csv_path: str | None = 
     except (ValueError, TypeError, KeyError) as e:
         return with_image(_bad_input(e, "check kind, x/y series names and the data shape in this tool's description"))
     res["source"] = {"study": study, "table": table} if study else ({"csv": csv_path} if csv_path else "data")
+    if study:
+        res["unverified"] = VERIFY.unverified(study)
     return with_image({"ok": True, "result": res})
 
 
-def _setup_table(f: dict) -> dict:
-    step = f.get("step") or {}
-    circ = f.get("circuit") or {}
-    comps = (circ.get("components") or []) if circ.get("has_circuit") else []
-    return {
-        "model": f.get("model"), "type": f.get("type"), "dimension": f.get("dimension"),
-        "stack length (ModelThickness)": f.get("model_thickness"), "length unit": f.get("length_unit"),
-        "mesh elements": f.get("elements"),
-        "materials": {p["name"]: p.get("material") for p in f.get("parts", [])},
-        "conditions": [f"{c['name']} ({c['type']})" for c in f.get("conditions", [])],
-        "circuit components": [f"{k['name']} ({k['type']})" for k in comps],
-        "steps": {k: step[k] for k in ("Step", "StepType", "TimeStep", "EndPoint") if k in step} or None,
-        "has result": f.get("has_result"),
-    }
 
 
 async def _report_study(study: str, model: str | None, f_e: float | None, include_images: bool) -> dict:
@@ -1480,7 +1725,7 @@ async def _report_study(study: str, model: str | None, f_e: float | None, includ
     s["setup"] = _setup_table(f)
     s["precheck"] = health.summarize(health.preflight(f, f_e))
     if f.get("has_result"):
-        post = await _post(study, model, f_e)
+        post = await _post(study, model, f_e, record=False)
         s["health"], s["convergence"], s["result_summary"] = post["health"], post["convergence"], post["result_summary"]
     if include_images:
         if f.get("has_result"):
@@ -1504,15 +1749,18 @@ async def jmag_make_report(title: str, studies: list[str], out_dir: str, include
     Per study: setup table (type, stack length, mesh, materials, conditions, circuit, steps), pre-run and
     post-run verdicts with EVERY error/warning finding (FAIL/CHECK blocks are never omitted), convergence,
     result statistics (each number names its table/column), contour and circuit images when include_images.
-    invariants: {study: [results of jmag_physics_check, e.g. {"check": "kvl", "ok": true, ...}]} - run the checks
-    first and pass them in. sweeps: [{"title", "columns": [...], "rows": [[...]], "study": <name, optional>}].
+    invariants: {study: [jmag_physics_check results, e.g. {"check": "kvl", "passed": true, ...}]} - run the checks
+    first; when a study is not in invariants, the jmag_physics_check results recorded this session are used.
+    A study whose results had no jmag_check(stage='post') / jmag_physics_check this session gets an open doubt
+    naming the missing check. sweeps: [{"title", "columns": [...], "rows": [[...]], "study": <name, optional>}].
     notes / doubts: free text; doubts are merged with automatic ones (unchecked studies, failed invariants).
     The reproduction appendix and replay.py come from this session's journal. out_dir: a folder outside the repo.
     """
     rows = []
     for st in studies:
         s = await _report_study(st, model, electrical_frequency_hz, include_images)
-        s["invariants"] = (invariants or {}).get(st, [])
+        s["invariants"] = (invariants or {}).get(st) or VERIFY.physics(st)
+        s["unverified"] = VERIFY.unverified(st)
         s["sweeps"] = [w for w in (sweeps or []) if w.get("study") == st or (len(studies) == 1 and not w.get("study"))]
         rows.append(s)
     if include_images and rows:
@@ -1617,33 +1865,58 @@ async def _inventory_study(st: dict, model: str) -> dict:
 
 # =========================================================================== knowledge
 
+_NO_DOCS = {"message": "JMAG-Designer installation not found, so its manual cannot be searched",
+            "hint": "set JMAG_HOME to the JMAG-Designer folder; jmag_doctor diagnoses the install"}
+
+
 @mcp.tool()
 async def jmag_docs_search(query: str, limit: int = 6) -> dict:
-    """Search the JMAG scripting manual installed on this machine (condition/circuit/study property names, flags,
-    result types). First call builds a local index (~1 min)."""
-    B.need_install()
-    assert B.docs is not None
-    info = await asyncio.to_thread(B.docs.ensure)
-    return {"index": info, "hits": await asyncio.to_thread(B.docs.search, query, limit)}
+    """Search the JMAG scripting manual installed on this machine (property names, flags, result types, API pages).
+    limit: hits returned (default 6). result = {index, hits}; read a hit with jmag_docs_page. Confirm any property
+    name on the live object with jmag_get_properties before relying on it.
+    BLOCKING_TOOLS: the first call builds a local index (~60 s); later calls are fast.
+    """
+    t0 = time.time()
+    if not B.install or B.docs is None:
+        return wrap(ok=False, t0=t0, error=dict(_NO_DOCS))
+    try:
+        info = await asyncio.to_thread(B.docs.ensure)
+        hits = await asyncio.to_thread(B.docs.search, query, limit)
+    except (OSError, ValueError) as e:
+        return wrap(ok=False, t0=t0, error={"message": f"manual index failed: {e}",
+                                             "hint": "check the JMAG install's help folder; jmag_doctor"})
+    return wrap({"index": info, "hits": hits}, t0=t0)
 
 
 @mcp.tool()
 async def jmag_docs_page(page: str, max_chars: int = 20000) -> dict:
-    """Full text of one manual page returned by jmag_docs_search (e.g. 'scriptMagneticSettings.html')."""
-    assert B.docs is not None
+    """Full text of one manual page returned by jmag_docs_search, e.g. 'scriptMagneticSettings.html'. max_chars
+    truncates (default 20000). result = {page, text}; an unknown page gives ok=false.
+    """
+    t0 = time.time()
+    if not B.install or B.docs is None:
+        return wrap(ok=False, t0=t0, error=dict(_NO_DOCS))
     try:
-        return {"page": page, "text": await asyncio.to_thread(B.docs.page, page, max_chars)}
+        return wrap({"page": page, "text": await asyncio.to_thread(B.docs.page, page, max_chars)}, t0=t0)
     except KeyError:
-        return {"ok": False, "error": {"message": f"page {page!r} not found"}}
+        return wrap(ok=False, t0=t0, error={"message": f"page {page!r} not found",
+                                             "hint": "use a 'file' value returned by jmag_docs_search"})
 
 
 @mcp.tool()
 async def jmag_api_lookup(query: str, limit: int = 15) -> dict:
-    """Look up JMAG Python API methods from the installed jmag/designer.py: 'Study.CreateCondition', 'CreateWire',
-    or keywords 'export image'. Use before writing jmag_exec_python code."""
-    B.need_install()
-    assert B.docs is not None
-    return {"hits": await asyncio.to_thread(B.docs.api_lookup, query, limit)}
+    """Look up JMAG Python API methods in the installed jmag/designer.py: 'Study.CreateCondition', 'CreateWire', or
+    keywords like 'export image'. limit: hits (default 15). result = {hits}. Use before writing jmag_exec_python code,
+    and prefer the idioms in the jmag-scripting skill.
+    """
+    t0 = time.time()
+    if not B.install or B.docs is None:
+        return wrap(ok=False, t0=t0, error=dict(_NO_DOCS))
+    try:
+        return wrap({"hits": await asyncio.to_thread(B.docs.api_lookup, query, limit)}, t0=t0)
+    except (OSError, ValueError) as e:
+        return wrap(ok=False, t0=t0, error={"message": f"API lookup failed: {e}",
+                                             "hint": "jmag_doctor checks the JMAG Python install"})
 
 
 @mcp.tool()
@@ -1652,6 +1925,7 @@ async def jmag_exec_python(code: str, timeout_s: float = 600) -> dict:
 
     Runs Python 3.8 inside the worker with `app` (JMAG Application) in scope; set `result = ...` to return data,
     print() is captured. JMAG errors are still detected via the message log. Look up APIs with jmag_api_lookup first.
+    BLOCKING_TOOLS: blocks up to timeout_s (default 600 s); keep timeout_s below your client's tool timeout.
     """
     return await run_op("exec_python", timeout_s, code=code)
 
@@ -1665,10 +1939,25 @@ async def jmag_self_test(keep_open: bool = False, work_dir: str | None = None) -
     Builds a gapped C-core inductor from an external DXF, solves a static and a transient (circuit) study, and checks
     inductance vs analytic, static vs transient consistency, KVL residual and flux density range.
     Run it after installing, after JMAG updates, or whenever results look suspicious.
+    Envelope: ok=true means the test ran to the end; result.passed / result.verdict (PASS | FAIL) say whether every
+    known-answer check held (result.checks lists them). ok=false: it could not run (result has the diagnostics).
+    BLOCKING_TOOLS: blocks about 120 s (it starts its own JMAG instance).
     """
     from .selftest import run_self_test
-    B.need_install()
-    return with_first_run_note(await asyncio.to_thread(run_self_test, B.install, keep_open, work_dir))
+    t0 = time.time()
+    if not B.install:
+        return wrap(ok=False, t0=t0, error={"message": "JMAG-Designer installation not found",
+                                             "hint": "set JMAG_HOME; jmag_doctor diagnoses the install"})
+    raw = dict(await asyncio.to_thread(run_self_test, B.install, keep_open, work_dir))
+    passed = bool(raw.pop("ok", False))
+    if raw.get("error"):
+        err = {"message": f"self-test could not run: {raw['error']}",
+               "hint": "read result.worker_log; jmag_doctor checks the install; close leftover JMAG dialogs"}
+        return with_first_run_note(wrap(raw, ok=False, error=err, t0=t0))
+    body = {**raw, "passed": passed, "verdict": "PASS" if passed else "FAIL"}
+    if not passed:
+        body["hint"] = "failed checks: " + ", ".join(c["check"] for c in raw.get("checks", []) if not c.get("pass"))
+    return with_first_run_note(wrap(body, t0=t0))
 
 
 @mcp.tool(annotations=READ_ONLY)
@@ -1708,12 +1997,18 @@ async def jmag_star_repo(action: str) -> dict:
     action='star' (user said yes): stars through the GitHub CLI (`gh`); if gh is missing, not logged in or fails,
       opens the repo page in the browser instead. action='open': opens the repo page only. action='dismiss' (no).
     Any answer is recorded in state.json and the note never appears again on this machine.
-    Returns {ok, method: gh | already_starred | browser | dismissed, message, url}.
+    Returns {ok, result: {method: gh | already_starred | browser | dismissed, message, url}, seconds}.
     """
+    t0 = time.time()
     try:
-        return await asyncio.to_thread(star.star_repo, action)
+        r = await asyncio.to_thread(star.star_repo, action)
     except ValueError as e:
-        return {"ok": False, "error": {"message": str(e), "hint": "star | open | dismiss"}}
+        return wrap(ok=False, t0=t0, error={"message": str(e), "hint": "star | open | dismiss"})
+    body = {k: v for k, v in r.items() if k != "ok"}
+    if r.get("ok"):
+        return wrap(body, t0=t0)
+    return wrap(body, ok=False, t0=t0, error={"message": r.get("message") or "could not star or open the repository",
+                                               "hint": f"tell the user the page: {r.get('url')}"})
 
 
 def _journal_rows(session_only: bool = True) -> list[dict]:
@@ -1733,12 +2028,17 @@ def _journal_rows(session_only: bool = True) -> list[dict]:
 async def jmag_journal(export_script: str | None = None, session_only: bool = True) -> dict:
     """Show the log of state-changing operations; export_script=path writes a replayable Python script
     (runs with JMAG's bundled Python) that reproduces the session - a reproducible record of the model build."""
-    rows = _journal_rows(session_only)
-    out: dict = {"ok": True, "entries": len(rows), "last": rows[-30:]}
-    if export_script:
-        from .replay import write_replay_script
-        out["script"] = write_replay_script(rows, export_script, B.install)
-    return out
+    t0 = time.time()
+    try:
+        rows = _journal_rows(session_only)
+        out: dict = {"entries": len(rows), "last": rows[-30:]}
+        if export_script:
+            from .replay import write_replay_script
+            out["script"] = write_replay_script(rows, export_script, B.install)
+    except OSError as e:
+        return wrap(ok=False, t0=t0, error={"message": f"journal could not be read or written: {e}",
+                                             "hint": "choose a writable export_script path"})
+    return wrap(out, t0=t0)
 
 
 # =========================================================================== advanced API: capabilities, design-table
@@ -1931,6 +2231,7 @@ async def jmag_loss_study(action: str = "create", study: str = "", name: str | N
       The response lists all condition/study property names and the parts' materials. Library loss data is not
       readable through the API (protected materials); a core part with 0 W after the run means missing data.
       run=true solves it right away (seconds) and returns the loss summary.
+      BLOCKING_TOOLS: with run=true it blocks until the loss solve ends (up to 3600 s; usually seconds).
     action='results': study=<loss study>: every table whose name contains 'Loss' (Iron Loss, Joule Loss,
       Hysteresis Loss and their '(Each Component)' variants) with the total [W] per part and overall.
       Row 0 (0 Hz) holds the total; rows 1.. are frequency components (x in Hz) - verified: Iron = Hysteresis +
@@ -2105,9 +2406,18 @@ async def jmag_experiment(kind: str, study: str, params: dict, action: str = "ru
     kind='inductance_static' (Static study with jmag_add_current conditions; runs blocking in the main worker):
       params {current_peak, conditions: [...]} -> L = sum(psi)/I; or {current_peak, phases: {'U': [conds], 'V':
       [...], 'W': [...]}, d_axis_elec_deg} -> three solves (0, d, q) -> Ld, Lq, psi_pm, saliency.
-    Common params: duplicate (default true -> '<study>_<kind>'), new_study, source/motion (component/condition
-    names if ambiguous), wait_seconds (600), estimate={'kind': 'emf_constant', 'params': {...}} attaches the
-    jmag_estimate expectation. If the solve outlives wait_seconds the result says how to call action='analyze'.
+    Units: poles = number of poles (2p, e.g. 4 for 2 pole pairs). rpm defaults: cogging 60, back_emf and
+    load_point 1000.
+    Common params: duplicate (default true -> works on a copy named '<study>_<kind>'), new_study (another copy
+    name), source/motion (component/condition names if ambiguous), wait_seconds (600),
+    estimate={'kind': 'emf_constant', 'params': {...}} attaches the jmag_estimate expectation.
+    Duplicate name: if '<study>_<kind>' already exists (an earlier experiment), the call fails with ok=false and the
+    hint: pass new_study=..., jmag_delete_study it, or analyze it with duplicate=false, action='analyze'.
+    Failures are never silent: a refused pre-check, a failed or aborted solve returns ok=false with the findings
+    (result.precheck / result.run) and a hint naming the leftover duplicated study and jmag_delete_study.
+    If the solve is still running after wait_seconds, ok=true with result.next = poll jmag_run_status, then
+    action='analyze'. result.unverified lists the checks (post-check, physics-check) not run on the copy's results.
+    BLOCKING_TOOLS: blocks up to wait_seconds (default 600 s) - keep it below your client's tool timeout.
     Status: all four kinds VERIFIED on 23.0 (12s/4p SPM: cogging dominant order 12/rev, back-EMF psi1 0.0586 Wb,
     load-point power balance 0.9 %, Ld = Lq = 0.37 mH); numbers in references/advanced-api.md.
     """
@@ -2122,6 +2432,11 @@ async def jmag_experiment(kind: str, study: str, params: dict, action: str = "ru
 
     try:
         res = await experiments.run_experiment(kind, study, params, call, solve, model=model, action=action)
+    except experiments.ExperimentFailed as e:
+        out: dict = {"ok": False, "error": {"message": e.message, "hint": e.hint}}
+        if e.data:
+            out["result"] = e.data
+        return out
     except (ValueError, RuntimeError) as e:
         return {"ok": False, "error": {"message": str(e),
                                        "hint": "fix the params or the study setup named above, then call again"}}
@@ -2132,6 +2447,8 @@ async def jmag_experiment(kind: str, study: str, params: dict, action: str = "ru
     except TypeError as e:
         return {"ok": False, "error": {"message": f"bad param type: {e}",
                                        "hint": "numbers must be numbers, conditions/phases lists or dicts as documented"}}
+    if isinstance(res, dict) and res.get("study") and (res.get("metrics") or res.get("kind") == "inductance_static"):
+        res["unverified"] = VERIFY.unverified(res["study"])
     return {"ok": True, "result": res}
 
 
