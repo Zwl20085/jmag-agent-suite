@@ -1,10 +1,11 @@
 # Lists modal dialogs owned by JMAG processes (UI Automation) and optionally clicks a button.
 # Output: one JSON object per dialog.
-param([string]$Click = "", [string]$TitleFilter = "", [string]$ProcNames = "designer|modeller")
+param([string]$Click = "", [string]$TitleFilter = "", [string]$ProcNames = "designer|modeller", [int]$OwnerPid = 0)
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
 $UIA = [System.Windows.Automation.AutomationElement]
 $CT = [System.Windows.Automation.ControlType]
 $pids = @(Get-Process | Where-Object { $_.ProcessName -match "^($ProcNames)$" } | ForEach-Object { $_.Id })
+if ($OwnerPid -gt 0) { $pids = @($pids | Where-Object { $_ -eq $OwnerPid }) }   # one JMAG instance only
 $isCt = { param($t) New-Object System.Windows.Automation.PropertyCondition($UIA::ControlTypeProperty, $t) }
 $tops = $UIA::RootElement.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)
 foreach ($w in $tops) {

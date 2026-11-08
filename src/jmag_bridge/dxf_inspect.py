@@ -95,8 +95,42 @@ def _poly_prims(pts: list[tuple], bulges: list[float], closed: bool, layer: str)
     return out
 
 
+def _extrusion(d: list[tuple[int, str]]) -> str:
+    """'z' (default 0,0,1), 'mirror' (0,0,-1: the entity's OCS has x -> -x) or 'other' (a general extrusion)."""
+    nx, ny, nz = (float(_get(d, c, dflt)) for c, dflt in ((210, 0.0), (220, 0.0), (230, 1.0)))
+    if abs(nx) < 1e-9 and abs(ny) < 1e-9:
+        return "z" if nz > 0 else "mirror"
+    return "other"
+
+
+def _mirror(p: tuple) -> tuple:
+    """x -> -x of a primitive (OCS with extrusion 0,0,-1 seen from +z); arcs stay CCW."""
+    if p[0] == "line":
+        return ("line", (-p[1][0], p[1][1]), (-p[2][0], p[2][1]), p[3])
+    sw = _sweep(p[3], p[4])
+    a0 = 180.0 - (p[3] + sw)
+    return ("arc", (-p[1][0], p[1][1]), p[2], a0, a0 + sw, p[5])
+
+
+def header_units(text: str) -> tuple[str, int | None]:
+    """$INSUNITS of the HEADER: ('mm', 4), ('in', 1), else ('unknown', code or None)."""
+    pairs = _pairs(text)
+    for k, (c, v) in enumerate(pairs[:-1]):
+        if c == 9 and v == "$INSUNITS" and pairs[k + 1][0] == 70:
+            try:
+                code = int(float(pairs[k + 1][1]))
+            except ValueError:
+                return "unknown", None
+            return {4: "mm", 1: "in"}.get(code, "unknown"), code
+    return "unknown", None
+
+
 def parse(text: str) -> tuple[list[tuple], dict]:
-    """DXF text -> primitives [("line", a, b, layer) | ("arc", c, r, a0_deg, a1_deg, layer)] (arcs CCW), skipped."""
+    """DXF text -> primitives [("line", a, b, layer) | ("arc", c, r, a0_deg, a1_deg, layer)] (arcs CCW), skipped.
+
+    ARC / CIRCLE / LWPOLYLINE / POLYLINE coordinates are in the entity's OCS: extrusion (0, 0, -1) (210/220/230)
+    is mirrored (x -> -x, bulges negated); any other non-Z extrusion is skipped and counted in `skipped` as
+    '<TYPE> (non-Z extrusion)'. LINE end points are WCS."""
     ents = _entities(_pairs(text))
     prims: list[tuple] = []
     skipped: Counter = Counter()
@@ -105,12 +139,21 @@ def parse(text: str) -> tuple[list[tuple], dict]:
         typ, d = ents[k]
         layer = str(_get(d, 8, "0"))
         f = lambda code, dflt=0.0: float(_get(d, code, dflt))  # noqa: E731
-        if typ == "LINE":
-            prims.append(("line", (f(10), f(20)), (f(11), f(21)), layer))
+        ext = _extrusion(d) if typ in ("ARC", "CIRCLE", "LWPOLYLINE", "POLYLINE") else "z"
+        new: list[tuple] = []
+        if ext == "other":
+            skipped[f"{typ} (non-Z extrusion)"] += 1
+            if typ == "POLYLINE":
+                k += 1
+                while k < len(ents) and ents[k][0] == "VERTEX":
+                    k += 1
+                continue
+        elif typ == "LINE":
+            new.append(("line", (f(10), f(20)), (f(11), f(21)), layer))
         elif typ == "ARC":
-            prims.append(("arc", (f(10), f(20)), f(40), f(50), f(51), layer))
+            new.append(("arc", (f(10), f(20)), f(40), f(50), f(51), layer))
         elif typ == "CIRCLE":
-            prims.append(("arc", (f(10), f(20)), f(40), 0.0, 360.0, layer))
+            new.append(("arc", (f(10), f(20)), f(40), 0.0, 360.0, layer))
         elif typ == "LWPOLYLINE":
             pts, bul = [], []
             for c, v in d:
@@ -122,7 +165,7 @@ def parse(text: str) -> tuple[list[tuple], dict]:
                 elif c == 42 and bul:
                     bul[-1] = float(v)
             closed = bool(int(float(_get(d, 70, 0))) & 1)
-            prims += _poly_prims([tuple(p) for p in pts], bul, closed, layer)
+            new += _poly_prims([tuple(p) for p in pts], bul, closed, layer)
         elif typ == "POLYLINE":
             closed = bool(int(float(_get(d, 70, 0))) & 1)
             pts, bul = [], []
@@ -132,10 +175,12 @@ def parse(text: str) -> tuple[list[tuple], dict]:
                 pts.append((float(_get(vd, 10, 0.0)), float(_get(vd, 20, 0.0))))
                 bul.append(float(_get(vd, 42, 0.0)))
                 k += 1
-            prims += _poly_prims(pts, bul, closed, layer)
+            new += _poly_prims(pts, bul, closed, layer)
+            prims += [_mirror(p) for p in new] if ext == "mirror" else new
             continue  # k already at SEQEND (or the next entity)
         elif typ not in ("SEQEND", "VERTEX"):
             skipped[typ] += 1
+        prims += [_mirror(p) for p in new] if ext == "mirror" else new
         k += 1
     return prims, dict(skipped)
 
@@ -499,6 +544,7 @@ def inspect(path: str) -> dict:
     except OSError as e:
         raise DxfReadError(f"cannot read {path}: {e}", "pass the absolute path of an existing .dxf file") from None
     prims, skipped = parse(text)
+    units, units_code = header_units(text)
     if not prims:
         raise DxfReadError(f"{path} has no LINE/ARC/CIRCLE/LWPOLYLINE/POLYLINE entities (skipped: {skipped})",
                            "explode blocks / convert splines to polylines in the CAD tool and export again")
@@ -512,6 +558,12 @@ def inspect(path: str) -> dict:
         warnings.append(f"entities not read: {skipped} (splines/ellipses/blocks: convert to polylines)")
     if not regs:
         warnings.append("no closed region found")
+    if units == "in":
+        warnings.append("$INSUNITS says inches, but jmag_import_dxf reads the numbers in the model length unit (mm by "
+                        "default): scale the drawing by 25.4 or confirm the unit; areas here are in drawing units^2")
+    elif units == "unknown":
+        warnings.append(f"drawing units unknown ($INSUNITS {'missing' if units_code is None else units_code}): the "
+                        "numbers are read as the model length unit (mm by default); areas here are in drawing units^2")
     rnd = lambda v: float(f"{v:.6g}")  # noqa: E731
     rows = [{"id": r["id"], "name": r["name"], "guess": r["guess"], "confidence": r["confidence"],
              "area_mm2": rnd(r["area_mm2"]), "centroid": [rnd(v) for v in r["centroid"]],
@@ -520,7 +572,7 @@ def inspect(path: str) -> dict:
     magnets = sorted((r for r in regs if r["guess"] == "magnet-like"), key=lambda r: r["angle_deg"] % 360.0)
     rotor_parts = [r["name"] for r in regs if r["guess"] in ("rotor-like", "magnet-like", "shaft-like")]
     labels: dict[str, Any] = {
-        "dxf": str(path), "units": "mm", "draft": True,
+        "dxf": str(path), "units": units, "draft": True,
         "parts": [{"name": r["name"], "point": r["point"], "confidence": r["confidence"]} for r in rows],
         "magnets": [{"name": r["name"], "center_deg": rnd(r["angle_deg"] % 360.0),
                      "polarity": "outward" if k % 2 == 0 else "inward", "confidence": 0.3}
@@ -533,6 +585,6 @@ def inspect(path: str) -> dict:
     }
     if not labels["magnets"]:
         labels.pop("magnets")
-    return {"path": str(path), "regions": rows, "region_count": len(rows),
+    return {"path": str(path), "units": units, "regions": rows, "region_count": len(rows),
             "guesses": dict(Counter(r["guess"] for r in rows)), "labels_draft": labels,
             "diagnostics": {**diag, "primitives": len(prims), "skipped_entities": skipped}, "warnings": warnings}

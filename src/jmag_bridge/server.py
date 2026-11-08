@@ -62,6 +62,9 @@ READ_ONLY_OPS = {"ping", "app_info", "list_parts", "get_properties", "get_equati
                  "circuit_summary", "calc_folder", "report", "list_results", "get_result", "study_facts"}
 
 
+WORKER_HINT = "worker failed; call jmag_status, then jmag_connect again or jmag_doctor"
+
+
 class Bridge:
     def __init__(self) -> None:
         self.install = find_jmag()
@@ -88,7 +91,7 @@ class Bridge:
             return {"ok": False, "error": {"message": str(e), "hint": "JMAG may be blocked by a modal dialog; worker was restarted, "
                                            "call jmag_connect again", "dialogs": dlg}}
         except WorkerError as e:
-            return {"ok": False, "error": {"message": str(e)}}
+            return {"ok": False, "error": {"message": str(e), "hint": WORKER_HINT}}
         if op not in READ_ONLY_OPS:
             self._journal(op, args, resp.get("ok"))
         return resp
@@ -102,6 +105,7 @@ class Bridge:
 
 
 B = Bridge()
+THD_ORDERS = 15     # jmag_get_result: THD over harmonic orders 2..15
 VERIFY = sup.VerifyRecord()          # which studies had post-check / physics-check on their current results
 
 
@@ -125,8 +129,8 @@ _PROJECT_OPS = {"project_new", "project_open", "connect", "quit_app"}
 
 
 async def run_op(op: str, timeout: float = 600, **args: Any) -> dict:
-    if op in ("run", "run_cases"):
-        VERIFY.invalidate(args.get("study"))      # new results: earlier checks no longer apply
+    if op == "run":   # a solve in the main worker (static inductance, loss study); runner solves invalidate in jmag_run*
+        VERIFY.invalidate(args.get("study"), args.get("model"))      # new results: earlier checks no longer apply
     env = envelope(await B.call(op, timeout, **{k: v for k, v in args.items() if v is not None}))
     if op in _PROJECT_OPS and env.get("ok"):
         VERIFY.clear()
@@ -342,7 +346,9 @@ async def jmag_dxf_inspect(path: str) -> dict:
     and role (confidence < 0.7 is a guess), add coils (jmag_winding_plan labels_coils) and parameters.stack_mm.
     Entities read: LINE, ARC, CIRCLE, LWPOLYLINE, POLYLINE (bulges = arcs). Edges ending on another edge are split
     there; edges crossing without an end point, SPLINE/ELLIPSE/blocks are not handled (result.warnings says so,
-    open ends are counted). Areas from 1-degree arc sampling (about 0.005 % low on arcs).
+    open ends are counted). OCS extrusion (0,0,-1) (mirrored entities) is honoured, other non-Z extrusions are
+    skipped. result.units from $INSUNITS (mm | in | unknown, with a warning: JMAG reads the numbers in the model
+    unit). Areas in drawing units^2 from 1-degree arc sampling (about 0.005 % low on arcs).
     """
     from . import dxf as dxf_mod
     from .dxf_inspect import DxfReadError
@@ -753,7 +759,7 @@ async def _post(study: str, model: str | None, electrical_frequency_hz: float | 
         info.update({k: v for k, v in run_env["result"].items() if k in ("errors", "warnings", "has_result")})
     facts = (await _facts(study, model)).get("result") or {}
     derived = None
-    if electrical_frequency_hz is None and facts:
+    if electrical_frequency_hz is None and str(facts.get("type", "")).startswith("Transient"):
         derived = health.derive_electrical_frequency(facts)
         electrical_frequency_hz = derived["hz"] if derived else None
     torque_cond = (any(c.get("type") in ("Torque", "Torque_Surface", "LorentzTorque") for c in facts.get("conditions", []))
@@ -778,7 +784,7 @@ async def _post(study: str, model: str | None, electrical_frequency_hz: float | 
                for title, tb in tables.items()}
     verdict = health.summarize(findings)
     if record and info.get("has_result"):
-        VERIFY.mark_post(study, verdict["verdict"])
+        VERIFY.mark_post(study, model, verdict["verdict"])
     return {"health": verdict, "convergence": conv, "result_summary": summary,
             "calc_folder": info.get("calc_folder")}
 
@@ -871,8 +877,9 @@ async def jmag_run(study: str, wait_seconds: float = 120, overwrite: bool = True
         return runner.call("run", 30 * 24 * 3600, **args)
 
     job = {"id": uuid.uuid4().hex[:8], "study": study, "model": model, "started": time.time(), "done": False,
-           "runner": runner, "folder": folder, "total_steps": total_steps, "freq": electrical_frequency_hz, "precheck": pre}
-    VERIFY.invalidate(study)   # the study gets new results: earlier post/physics checks no longer apply
+           "runner": runner, "folder": folder, "total_steps": total_steps, "freq": electrical_frequency_hz, "precheck": pre,
+           "pid": pid}
+    VERIFY.invalidate(study, model)   # the study gets new results: earlier post/physics checks no longer apply
     loop = asyncio.get_running_loop()
     fut = loop.run_in_executor(None, work)
     job["future"] = fut
@@ -968,18 +975,23 @@ async def _unowned_run_status() -> dict:
     return st
 
 
-async def _abort_protocol(folder: str | None, steps: list[str]) -> None:
-    """The verified stop order: Abort in 'Run Analysis' -> answer 'Stop calculation' -> wait up to 10 s for the
-    solver -> only then terminate the ExecSolver/jam tree working in `folder`. Appends what it did to steps."""
-    r = await asyncio.to_thread(winui.click, "Abort", "Run Analysis", 3.0)
+async def _press_abort(steps: list[str], pid: int | None) -> None:
+    """Abort in 'Run Analysis', then answer JMAG's 'Stop calculation' prompt (windows of `pid` only when given)."""
+    r = await asyncio.to_thread(winui.click, "Abort", "Run Analysis", 3.0, pid=pid)
     if r.get("clicked"):
         steps.append("pressed Abort")
         for _ in range(10):
-            a = await asyncio.to_thread(winui.click, "Yes, and open results", "Stop calculation", 20.0)
+            a = await asyncio.to_thread(winui.click, "Yes, and open results", "Stop calculation", 20.0, pid=pid)
             if a.get("clicked"):
                 steps.append("answered 'Yes, and open results'")
                 break
             await asyncio.sleep(0.5)
+
+
+async def _abort_protocol(folder: str | None, steps: list[str], pid: int | None = None) -> None:
+    """The verified stop order: Abort in 'Run Analysis' -> answer 'Stop calculation' -> wait up to 10 s for the
+    solver -> only then terminate the ExecSolver/jam tree working in `folder`. Appends what it did to steps."""
+    await _press_abort(steps, pid)
     for _ in range(20):
         if not await asyncio.to_thread(solver_monitor.solver_processes, folder):
             break
@@ -1001,12 +1013,15 @@ async def jmag_cancel_run() -> dict:
     protocol runs; the solver tree is only killed when exactly one solver calc folder is found (unverified live).
     """
     job = B.job
-    if not job or job.get("done"):
+    if not job:
         return await _cancel_unowned()
+    if job.get("done"):
+        return {"ok": False, "error": {"message": "nothing is running",
+                                       "hint": "the last run of this bridge has finished; jmag_run_status shows it"}}
     if job.get("kind") == "cases":  # stop starting new cases; kill target = current case folder
         _cases_cancel_prepare(job)
     steps: list[str] = []
-    await _abort_protocol(job.get("folder"), steps)
+    await _abort_protocol(job.get("folder"), steps, job.get("pid"))
     for _ in range(60):
         if job.get("done"):
             break
@@ -1023,29 +1038,35 @@ async def jmag_cancel_run() -> dict:
 
 
 async def _cancel_unowned() -> dict:
-    """jmag_cancel_run without a bridge-owned job (unverified live): run the abort protocol on a GUI/orphan solve."""
-    windows = await asyncio.to_thread(winui.dialogs, "Run Analysis")
+    """jmag_cancel_run without any bridge job (server restart, GUI-started solve; unverified live).
+
+    Acts on the connected JMAG instance only: its pid (app_info, else the remembered pid) filters the windows, and
+    the solver tree is killed only when exactly one solver calc folder lies in that instance's project
+    (<project>.jfiles). Other JMAG instances' windows and solvers are never touched."""
+    info = await run_op("app_info", 60)
+    res = (info.get("result") or {}) if info.get("ok") else {}
+    pid = res.get("jmag_pid") or load_state().get("jmag_pid")
+    project = res.get("project_path")
+    if not pid:
+        return {"ok": False, "error": {"message": "no run of this bridge and no connected JMAG instance",
+                                       "hint": "jmag_connect(pid=...) to the instance that is solving, then call "
+                                               "jmag_cancel_run again"}}
+    windows = await asyncio.to_thread(winui.dialogs, "Run Analysis", pid=pid)
     if not windows:
-        return {"ok": False, "error": {"message": "nothing is running (no bridge job and no 'Run Analysis' window)",
+        return {"ok": False, "error": {"message": f"nothing is running in the connected JMAG (pid {pid}): no bridge "
+                                                  "job and no 'Run Analysis' window",
                                        "hint": "jmag_status lists solver_processes; nothing to cancel"}}
     status = await _solver_status()
-    folders = status.get("calc_folders") or []
-    steps: list[str] = ["no bridge-owned run: using the 'Run Analysis' window (unverified live path)"]
+    every = status.get("calc_folders") or []
+    folders = [f for f in every if sup.folder_in_project(f, project)]
+    steps: list[str] = [f"no bridge-owned run: using the 'Run Analysis' window of pid {pid} (unverified live path)"]
     if len(folders) == 1:
-        await _abort_protocol(folders[0], steps)
-    else:  # never kill solvers of an unknown folder: they may belong to another JMAG instance
-        r = await asyncio.to_thread(winui.click, "Abort", "Run Analysis", 3.0)
-        if r.get("clicked"):
-            steps.append("pressed Abort")
-            for _ in range(10):
-                a = await asyncio.to_thread(winui.click, "Yes, and open results", "Stop calculation", 20.0)
-                if a.get("clicked"):
-                    steps.append("answered 'Yes, and open results'")
-                    break
-                await asyncio.sleep(0.5)
-        steps.append(f"solver tree not killed: {len(folders)} calc folders found ({folders}); "
+        await _abort_protocol(folders[0], steps, pid)
+    else:  # never kill solvers that cannot be tied to this instance's project
+        await _press_abort(steps, pid)
+        steps.append(f"solver tree not killed: {len(folders)} calc folder(s) of project {project!r} among {every}; "
                      "check jmag_status.solver_processes")
-    leftover = await asyncio.to_thread(winui.dialogs)
+    leftover = await asyncio.to_thread(winui.dialogs, "", pid=pid)
     return {"ok": True, "steps": steps, "dialogs_left": leftover, "unverified_live": True,
             "hint": "confirm with jmag_status that solver_processes is empty; inspect dialogs_left with jmag_dialogs"}
 
@@ -1105,7 +1126,8 @@ async def jmag_get_result(study: str, table: str, columns: list[str] | None = No
     last_period.harmonic_amplitudes: PEAK amplitudes, index k = order k of the electrical frequency ([0] = DC,
     [1] = fundamental), over the last full electrical period (endpoint excluded). n_harmonics: their count =
     orders 0 .. n_harmonics-1 (default 10 -> orders 0-9, max 64; also limited by samples per period / 2). A
-    harmonic above the limit is not reported, not zero. periodicity compares the last two periods (steady flag).
+    harmonic above the limit is not reported, not zero. thd_pct is always over orders 2..15 (whatever
+    n_harmonics is; None for DC-dominant tables such as torque). periodicity compares the last two periods (steady flag).
     case: design-table case index (0-based) to read instead of the current case (refused while a solve runs).
     Loss-study tables have x_name 'frequency' (Hz).
     result.unverified lists the checks not yet run on this study's current results this session
@@ -1127,10 +1149,11 @@ async def jmag_get_result(study: str, table: str, columns: list[str] | None = No
         s = _round(health.waveform_stats(ys))
         if electrical_frequency_hz and r["x_name"] == "time" and len(x) > 4:
             px, py = health.last_period(x, ys, 1.0 / electrical_frequency_hz)
-            h = health.harmonics(py, orders=max(15, n_harmonics - 1))
+            h = health.harmonics(py, orders=max(THD_ORDERS, n_harmonics - 1))
+            h_thd = health.harmonics(py, orders=THD_ORDERS)   # THD over orders 2..15, independent of n_harmonics
             if h:
                 s["last_period"] = {"mean": sum(py) / len(py), "fundamental": h["fundamental"],
-                                    "thd_pct": h.get("thd_pct"),  # None for DC-dominant tables (torque): harmonics() omits it
+                                    "thd_pct": h_thd.get("thd_pct"),  # None for DC-dominant tables (torque)
                                     "harmonic_amplitudes": [float(f"{a:.4g}") for a in h["amplitudes"][:n_harmonics]]}
             p = health.periodicity(x, ys, 1.0 / electrical_frequency_hz)
             if p:
@@ -1140,7 +1163,7 @@ async def jmag_get_result(study: str, table: str, columns: list[str] | None = No
     env["result"] = {"table": r["table"], "unit": r["unit"], "x_name": r["x_name"], "x_unit": r["x_unit"],
                      "rows": len(x), "stats": stats, "stride": stride, "x": x[::stride],
                      "series": {c: v[::stride] for c, v in r["columns"].items()},
-                     "unverified": VERIFY.unverified(study, case)}
+                     "unverified": VERIFY.unverified(study, model, case)}
     return env
 
 
@@ -1153,7 +1176,7 @@ async def jmag_export_results(study: str, out_dir: str, tables: list[str] | None
     """
     env = await run_op("export_results", 900, study=study, out_dir=out_dir, tables=tables, model=model)
     if env.get("ok") and isinstance(env.get("result"), dict):
-        env["result"]["unverified"] = VERIFY.unverified(study)
+        env["result"]["unverified"] = VERIFY.unverified(study, model)
     return env
 
 
@@ -1499,7 +1522,7 @@ async def jmag_physics_check(study: str, check: str, coil: str | None = None, pr
     body = sup.invariant_verdict(check, res["result"])
     if defaults:
         body["defaults_used"] = defaults
-    VERIFY.mark_physics(study, {k: body[k] for k in ("check", "passed", "verdict") if k in body})
+    VERIFY.mark_physics(study, model, {k: body[k] for k in ("check", "passed", "verdict") if k in body})
     return wrap(body, t0=t0)
 
 
@@ -1709,7 +1732,7 @@ async def jmag_plot(kind: str, data: dict | None = None, csv_path: str | None = 
         return with_image(_bad_input(e, "check kind, x/y series names and the data shape in this tool's description"))
     res["source"] = {"study": study, "table": table} if study else ({"csv": csv_path} if csv_path else "data")
     if study:
-        res["unverified"] = VERIFY.unverified(study)
+        res["unverified"] = VERIFY.unverified(study, model)
     return with_image({"ok": True, "result": res})
 
 
@@ -1759,8 +1782,8 @@ async def jmag_make_report(title: str, studies: list[str], out_dir: str, include
     rows = []
     for st in studies:
         s = await _report_study(st, model, electrical_frequency_hz, include_images)
-        s["invariants"] = (invariants or {}).get(st) or VERIFY.physics(st)
-        s["unverified"] = VERIFY.unverified(st)
+        s["invariants"] = (invariants or {}).get(st) or VERIFY.physics(st, model)
+        s["unverified"] = VERIFY.unverified(st, model)
         s["sweeps"] = [w for w in (sweeps or []) if w.get("study") == st or (len(studies) == 1 and not w.get("study"))]
         rows.append(s)
     if include_images and rows:
@@ -2199,13 +2222,14 @@ async def jmag_run_cases(study: str, cases: list[int] | None = None, method: str
 
     job = {"id": jid, "kind": "cases", "study": study, "model": model, "started": time.time(), "done": False,
            "runner": runner, "folder": None, "total_steps": total_steps, "cases": cases,
-           "progress_file": str(progress), "cancel_file": str(cancel)}
+           "progress_file": str(progress), "cancel_file": str(cancel), "pid": pid}
     loop = asyncio.get_running_loop()
     fut = loop.run_in_executor(None, work)
     job["future"] = fut
     fut.add_done_callback(lambda f: _finish_job(job, f.result() if not f.exception() else
                                                 {"ok": False, "error": {"message": repr(f.exception())}}))
     B.job = job
+    VERIFY.invalidate(study, model)   # every case gets new results: earlier checks no longer apply
     B._journal("run_cases", {"study": study, "model": model, "cases": cases, "method": method,
                              "overwrite": overwrite}, None)
     await asyncio.wait({fut}, timeout=wait_seconds)
@@ -2448,7 +2472,7 @@ async def jmag_experiment(kind: str, study: str, params: dict, action: str = "ru
         return {"ok": False, "error": {"message": f"bad param type: {e}",
                                        "hint": "numbers must be numbers, conditions/phases lists or dicts as documented"}}
     if isinstance(res, dict) and res.get("study") and (res.get("metrics") or res.get("kind") == "inductance_static"):
-        res["unverified"] = VERIFY.unverified(res["study"])
+        res["unverified"] = VERIFY.unverified(res["study"], model)
     return {"ok": True, "result": res}
 
 

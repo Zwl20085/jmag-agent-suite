@@ -16,15 +16,15 @@ def test_wrap_always_has_ok_and_seconds():
 def test_verify_record_lifecycle():
     v = sup.VerifyRecord()
     assert v.unverified("S") == ["post-check", "physics-check"]
-    v.mark_post("S", "PASS")
+    v.mark_post("S", None, "PASS")
     assert v.unverified("S") == ["physics-check"]
-    v.mark_physics("S", {"check": "kvl", "passed": True, "verdict": "PASS"})
+    v.mark_physics("S", None, {"check": "kvl", "passed": True, "verdict": "PASS"})
     assert v.unverified("S") == [] and v.physics("S")[0]["check"] == "kvl"
     assert v.unverified("S", case=2) == ["post-check", "physics-check"]   # other design-table case: never covered
     assert v.unverified("Other") == ["post-check", "physics-check"]
     v.invalidate("S")                       # re-solved: old checks no longer describe the results
     assert v.unverified("S") == ["post-check", "physics-check"]
-    v.mark_post("S", "PASS")
+    v.mark_post("S", None, "PASS")
     v.clear()                               # project changed
     assert v.post("S") is None
 

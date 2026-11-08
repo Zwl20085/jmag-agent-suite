@@ -32,7 +32,8 @@ def _spm(path: Path, slots=12, poles=4) -> str:
 
 def test_spm_round_trip(tmp_path):
     r = dxf.inspect(_spm(tmp_path / "spm.dxf"))
-    assert r["region_count"] == 19 and r["warnings"] == []
+    assert r["region_count"] == 19 and r["units"] == "unknown"     # Dxf writes no header: units unknown, warned
+    assert len(r["warnings"]) == 1 and "$INSUNITS missing" in r["warnings"][0]
     assert r["guesses"] == {"stator-like": 1, "slot-like": 12, "airgap-like": 1, "rotor-like": 1, "magnet-like": 4}
     by = {x["name"]: x for x in r["regions"]}
     slot_exact = (45 ** 2 - 31 ** 2) * math.pi * 15 / 360

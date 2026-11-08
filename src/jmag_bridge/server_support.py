@@ -37,43 +37,52 @@ PHYSICS_CHECK = "physics-check"
 class VerifyRecord:
     """Which studies had jmag_check(stage='post') and jmag_physics_check run on their current results this session.
 
-    In memory only. Keyed by study name inside the current project: ``clear()`` runs when a project is opened,
-    created or JMAG is (re)connected, ``invalidate(study)`` when the study is solved again (old checks no
-    longer describe the new results)."""
+    In memory only. Keyed by (model or "", study) inside the current project - JMAG allows the same study name in
+    several models; a call without model is keyed "" (the current model). ``clear()`` runs when a project is
+    opened, created or JMAG is (re)connected; ``invalidate(study, model)`` when the study is solved again (old
+    checks no longer describe the new results) - model None invalidates that study name in every model, a named
+    model also drops the "" entry (it may have meant that model)."""
 
     def __init__(self) -> None:
-        self._rows: dict[str, dict] = {}
+        self._rows: dict[tuple[str, str], dict] = {}
+
+    @staticmethod
+    def _key(study: str, model: str | None) -> tuple[str, str]:
+        return (model or "", study)
 
     def clear(self) -> None:
         self._rows = {}
 
-    def invalidate(self, study: str | None) -> None:
-        if study:
-            self._rows = {k: v for k, v in self._rows.items() if k != study}
+    def invalidate(self, study: str | None, model: str | None = None) -> None:
+        if not study:
+            return
+        # model None may be any model; a named model may also be the one recorded as "" (current model)
+        drop = (lambda k: k[1] == study) if model is None else (lambda k: k[1] == study and k[0] in (model, ""))
+        self._rows = {k: v for k, v in self._rows.items() if not drop(k)}
 
-    def _row(self, study: str) -> dict:
-        return self._rows.get(study) or {"post": None, "physics": []}
+    def _row(self, study: str, model: str | None) -> dict:
+        return self._rows.get(self._key(study, model)) or {"post": None, "physics": []}
 
-    def mark_post(self, study: str, verdict: str | None) -> None:
-        row = self._row(study)
-        self._rows = {**self._rows, study: {**row, "post": {"verdict": verdict, "t": time.time()}}}
+    def mark_post(self, study: str, model: str | None, verdict: str | None) -> None:
+        row = self._row(study, model)
+        self._rows = {**self._rows, self._key(study, model): {**row, "post": {"verdict": verdict, "t": time.time()}}}
 
-    def mark_physics(self, study: str, record: dict) -> None:
-        row = self._row(study)
-        self._rows = {**self._rows, study: {**row, "physics": [*row["physics"], dict(record)]}}
+    def mark_physics(self, study: str, model: str | None, record: dict) -> None:
+        row = self._row(study, model)
+        self._rows = {**self._rows, self._key(study, model): {**row, "physics": [*row["physics"], dict(record)]}}
 
-    def post(self, study: str) -> dict | None:
-        return self._row(study)["post"]
+    def post(self, study: str, model: str | None = None) -> dict | None:
+        return self._row(study, model)["post"]
 
-    def physics(self, study: str) -> list[dict]:
-        return list(self._row(study)["physics"])
+    def physics(self, study: str, model: str | None = None) -> list[dict]:
+        return list(self._row(study, model)["physics"])
 
-    def unverified(self, study: str | None, case: int | None = None) -> list[str]:
+    def unverified(self, study: str | None, model: str | None = None, case: int | None = None) -> list[str]:
         """What has not run on these results: [] when both checks ran. A design-table case other than the
         current one (case is not None) is never covered: both checks look at the current case only."""
         if not study or case is not None:
             return [POST_CHECK, PHYSICS_CHECK]
-        row = self._row(study)
+        row = self._row(study, model)
         return ([] if row["post"] else [POST_CHECK]) + ([] if row["physics"] else [PHYSICS_CHECK])
 
 
@@ -358,3 +367,16 @@ def _setup_table(f: dict) -> dict:
         "steps": {k: step[k] for k in ("Step", "StepType", "TimeStep", "EndPoint") if k in step} or None,
         "has result": f.get("has_result"),
     }
+
+
+def folder_in_project(folder: str | None, project_path: str | None) -> bool:
+    """True when a solver calc folder lies inside the project's '<name>.jfiles' folder (JMAG's calc-folder layout
+    <project>.jfiles/<model>~N/<study>~M/CaseK). Unknown project or folder: False (never assume ownership)."""
+    if not folder or not project_path:
+        return False
+    proj = str(project_path).replace("\\", "/").rstrip("/")
+    if not proj.lower().endswith(".jproj"):
+        return False
+    jfiles = (proj[: -len(".jproj")] + ".jfiles").lower()
+    f = str(folder).replace("\\", "/").rstrip("/").lower()
+    return f == jfiles or f.startswith(jfiles + "/")

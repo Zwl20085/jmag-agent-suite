@@ -52,7 +52,7 @@ warnings for CHECK).
 | NO_MESH_YET | info | no mesh yet (made at run time) | fine; `jmag_mesh` to see it first |
 | CHECK_MAGNETIZATION | info | magnets present | verify with a B contour after the run |
 | STEP_CHECKS_SKIPPED | info | Transient study, no `electrical_frequency_hz` given and none derivable: COARSE_TIME_STEP and SHORT_SPAN were not checked | pass `electrical_frequency_hz` = poles/2 * rpm/60 (the fix names the study's rpm) |
-| FE_DERIVED | info | no `electrical_frequency_hz` given; derived from RotationMotion speed + a `poles`/`p` study equation, or speed + a circuit source `Frequency` whose implied pole count is an even integer | check the named source; pass the frequency explicitly if it is wrong |
+| FE_DERIVED | info | no `electrical_frequency_hz` given; derived (Transient studies only) from RotationMotion speed + a `poles` (even integer 2..120) / `p` (integer 1..60) study equation, or speed + a circuit source `Frequency` whose implied pole count is an even integer | check the named source; pass the frequency explicitly if it is wrong |
 
 ## 4. Post-run codes (`jmag_check(stage='post')`, included in finished `jmag_run_status`)
 

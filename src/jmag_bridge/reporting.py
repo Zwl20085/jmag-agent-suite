@@ -79,9 +79,21 @@ def _copy_images(paths: list[str], dest: Path, prefix: str) -> list[tuple[str, s
     return out
 
 
+def _unwrap(inv: dict) -> dict:
+    """jmag_physics_check's envelope {ok, result, seconds} -> its result (the check, passed and numbers)."""
+    if isinstance(inv, dict) and isinstance(inv.get("result"), dict):
+        return {"check": inv.get("check"), **inv["result"]}
+    return inv
+
+
 def _passed(inv: dict) -> bool | None:
-    """An invariant's outcome: jmag_physics_check results carry "passed"; older dicts carry "ok"."""
-    return inv.get("passed", inv.get("ok"))
+    """An invariant's outcome. Accepts jmag_physics_check's whole envelope ({ok, result: {passed}}: ok only means
+    the tool ran), its result ({passed}), or an older dict ({ok} = the physics held)."""
+    if isinstance(inv.get("result"), dict):
+        inv = inv["result"]
+    if "passed" in inv:
+        return inv["passed"]
+    return inv.get("ok")
 
 
 def _study_section(s: dict, img_dir: Path, include_images: bool, doubts: list[str]) -> str:
@@ -104,7 +116,7 @@ def _study_section(s: dict, img_dir: Path, include_images: bool, doubts: list[st
     v = verdict_of(s)
     if v in ("FAIL", "CHECK", "NOT CHECKED"):
         doubts.append(f"{name}: verdict {v} - resolve the findings above before using its numbers")
-    inv = s.get("invariants") or []
+    inv = [_unwrap(i) for i in s.get("invariants") or []]
     if inv:
         md.append("### Physics invariants\n")
         md.append(table(["check", "passed", "key numbers"],

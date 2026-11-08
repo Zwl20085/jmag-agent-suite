@@ -41,12 +41,17 @@ def _run_ps(script: str, *args: str, timeout: int = 60) -> list[dict]:
     return _parse(proc.stdout)
 
 
-def dialogs(title_filter: str = "") -> list[dict]:
-    """Visible JMAG dialogs: kind (modal|progress|window), title, text, buttons."""
-    return _run_ps("dialogs.ps1", *(["-TitleFilter", title_filter] if title_filter else []))
+def _filters(title_filter: str, pid: int | None) -> list[str]:
+    return (["-TitleFilter", title_filter] if title_filter else []) + (["-OwnerPid", str(int(pid))] if pid else [])
 
 
-def click(button: str, title_filter: str = "", wait: float = 15.0) -> dict:
+def dialogs(title_filter: str = "", pid: int | None = None) -> list[dict]:
+    """Visible JMAG dialogs: kind (modal|progress|window), title, text, buttons. pid: only windows of that
+    JMAG process (default: every designer/modeller process on the machine)."""
+    return _run_ps("dialogs.ps1", *_filters(title_filter, pid))
+
+
+def click(button: str, title_filter: str = "", wait: float = 15.0, pid: int | None = None) -> dict:
     """Press a dialog button without blocking on it.
 
     UI Automation's Invoke() is synchronous: if the button starts a long action (e.g. 'open results')
@@ -55,17 +60,17 @@ def click(button: str, title_filter: str = "", wait: float = 15.0) -> dict:
     """
     if os.name != "nt":
         return {"clicked": False}
-    before = [d for d in dialogs(title_filter) if button in (d.get("buttons") or [])]
+    before = [d for d in dialogs(title_filter, pid) if button in (d.get("buttons") or [])]
     if not before:
-        return {"clicked": False, "reason": f"no dialog with a '{button}' button", "dialogs": dialogs()}
-    args = ["-Click", button] + (["-TitleFilter", title_filter] if title_filter else [])
+        return {"clicked": False, "reason": f"no dialog with a '{button}' button", "dialogs": dialogs("", pid)}
+    args = ["-Click", button] + _filters(title_filter, pid)
     proc = subprocess.Popen(_cmd("dialogs.ps1", *args), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                             creationflags=_NO_WINDOW)
     t_end = time.time() + wait
     gone = False
     while time.time() < t_end:
         time.sleep(0.7)
-        still = [d for d in dialogs(title_filter) if d.get("title") == before[0].get("title")
+        still = [d for d in dialogs(title_filter, pid) if d.get("title") == before[0].get("title")
                  and button in (d.get("buttons") or [])]
         if not still:
             gone = True

@@ -197,7 +197,8 @@ def _need(params: dict, *names: str) -> None:
 def _ok(env: dict, what: str) -> dict:
     if not env.get("ok"):
         err = env.get("error") or {}
-        raise RuntimeError(f"{what}: {err.get('message')} | hint: {err.get('hint')}")
+        hint = err.get("hint")
+        raise RuntimeError(f"{what}: {err.get('message') or 'failed'}" + (f" | hint: {hint}" if hint else ""))
     return env.get("result") or {}
 
 

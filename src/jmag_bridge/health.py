@@ -28,7 +28,8 @@ THRESHOLDS = {
     "flat_rel": 1e-9,           # a torque table whose pk-pk is below this (relative to max(1, |max|)) is flat
 }
 
-#: Equation names (case-insensitive) read as the pole count 2p / the pole-pair count p when deriving f_e.
+#: Equation names (case-insensitive) read as the pole count 2p / the pole-pair count p when deriving f_e; only
+#: plausible values count (poles: even integer 2..120, pole pairs: integer 1..60), others are ignored.
 POLE_EQUATIONS = ("poles", "pole", "n_poles", "npoles", "num_poles", "pole_number", "number_of_poles")
 POLE_PAIR_EQUATIONS = ("pole_pairs", "polepairs", "pp", "p")
 
@@ -68,14 +69,25 @@ def motion_speed_rpm(facts: dict) -> float | None:
     return None
 
 
-def _equation_value(facts: dict, names: Sequence[str]) -> float | None:
+def _is_poles(v: float) -> bool:
+    """A plausible pole count 2p: an even integer 2..120."""
+    return float(v).is_integer() and 2 <= v <= 120 and int(v) % 2 == 0
+
+
+def _is_pole_pairs(v: float) -> bool:
+    """A plausible pole-pair count p: an integer 1..60 (an equation 'P' = 1000 W is not one)."""
+    return float(v).is_integer() and 1 <= v <= 60
+
+
+def _equation_value(facts: dict, names: Sequence[str], plausible) -> float | None:
+    """Value of the first equation named in `names` (case-insensitive) that passes `plausible`; others are ignored."""
     eqs = facts.get("equations") or {}
     low = {str(k).lower(): v for k, v in eqs.items()}
     for n in names:
         e = low.get(n)
         v = e.get("value") if isinstance(e, dict) else e
         try:
-            if v is not None and float(v) > 0:
+            if v is not None and math.isfinite(float(v)) and plausible(float(v)):
                 return float(v)
         except (TypeError, ValueError):
             continue
@@ -107,9 +119,9 @@ def derive_electrical_frequency(facts: dict) -> dict | None:
     rpm = motion_speed_rpm(facts)
     if not rpm:
         return None
-    poles = _equation_value(facts, POLE_EQUATIONS)
+    poles = _equation_value(facts, POLE_EQUATIONS, _is_poles)
     if poles is None:
-        pp = _equation_value(facts, POLE_PAIR_EQUATIONS)
+        pp = _equation_value(facts, POLE_PAIR_EQUATIONS, _is_pole_pairs)
         poles = 2 * pp if pp else None
     if poles:
         return {"hz": poles / 2.0 * abs(rpm) / 60.0, "source": "RotationMotion speed and the study's pole equation",

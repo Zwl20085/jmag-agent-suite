@@ -261,7 +261,8 @@ class Context(object):
                                      "and types)" + (" - op %r: %s" % (name, first) if first else "")}
         except Exception as e:
             resp["ok"] = False
-            resp["error"] = {"type": type(e).__name__, "message": str(e), "trace": traceback.format_exc()[-1500:]}
+            resp["error"] = {"type": type(e).__name__, "message": str(e), "hint": DEFAULT_HINT,
+                             "trace": traceback.format_exc()[-1500:]}
             if self.pid and not pid_alive(self.pid):
                 resp["error"] = {"type": "JmagCrashed",
                                  "message": "JMAG-Designer (pid %s) is no longer running - it crashed or was closed during '%s'"

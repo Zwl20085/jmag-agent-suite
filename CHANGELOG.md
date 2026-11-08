@@ -117,6 +117,24 @@
   `theta_e_deg` -> d, q), the same amplitude-invariant Park transform as `jmag_experiment`.
 - `jmag_get_result(n_harmonics=10)`: `harmonic_amplitudes` holds orders 0 .. n-1 (default 0-9, max 64).
 
+### Review fixes
+
+- `jmag_cancel_run` after the bridge's own run finished answers "nothing is running" again; the no-job path acts
+  only on the connected JMAG (its pid filters the windows: `dialogs.ps1 -OwnerPid`, `winui.dialogs/click(pid=)`)
+  and kills a solver only when exactly one calc folder lies in that instance's project (`<project>.jfiles`,
+  `server_support.folder_in_project`). Bridge jobs remember the JMAG pid.
+- `jmag_make_report` reads `passed` inside a whole `jmag_physics_check` envelope (`ok` there only means it ran).
+- `jmag_run_cases` invalidates the verification record; the record is keyed by (model, study).
+- `jmag_dxf_inspect`: entities with extrusion (0,0,-1) are mirrored (x -> -x, arcs stay CCW, bulges negated), other
+  non-Z extrusions are skipped and listed; `units` comes from `$INSUNITS` (mm | in | unknown, with a warning).
+- `solver_monitor.folder_from_command` accepts only absolute `.jcf` paths (also unquoted with spaces) and
+  `parse_process_lines(folder=)` matches the parsed calc folder as a path prefix, not a substring.
+- `jmag_get_result`: `thd_pct` is over orders 2..15 whatever `n_harmonics` is.
+- Default hints for worker exceptions and for `WorkerError` in the bridge; `experiments._ok` no longer prints
+  "hint: None".
+- f_e derivation accepts a pole equation only as an even integer 2..120 and a pole-pair equation only as an
+  integer 1..60 (an equation `P` = 1000 W is ignored); the post-run check derives f_e for Transient studies only.
+
 ### Plumbing
 
 - `.claude-plugin/plugin.json` version 0.4.0; `tests/test_versions.py` asserts pyproject == `__version__` ==

@@ -280,43 +280,7 @@ def test_run_status_without_job(fake, monkeypatch):
     assert st["ok"] is False and st["state"] == "none" and st["solver_processes"] == [] and "error" in st
 
 
-def test_cancel_without_job_uses_the_abort_protocol(fake, monkeypatch):
-    clicks, killed = [], []
-    monkeypatch.setattr(server.winui, "dialogs", lambda title_filter="": (
-        [{"kind": "progress", "title": "Run Analysis", "text": ""}] if title_filter == "Run Analysis" else []))
-    monkeypatch.setattr(server.winui, "click", lambda button, title="", wait=0: (
-        clicks.append(button) or {"clicked": button}))
-    monkeypatch.setattr(server.sup, "solver_status", lambda folder: {
-        "solver_processes": [{"pid": 4}], "calc_folders": ["C:/p/Case1"], "newest_monitor_age_s": 1.0, "stalled": False})
-    procs = [[{"pid": 4}]] * 25                                               # solver never exits by itself
-    monkeypatch.setattr(server.solver_monitor, "solver_processes", lambda folder=None, **k: procs.pop() if procs else [])
-    monkeypatch.setattr(server.solver_monitor, "kill_solver", lambda folder=None: killed.append(folder) or [4])
-
-    async def no_sleep(_):
-        return None
-
-    monkeypatch.setattr(server.asyncio, "sleep", no_sleep)
-    r = asyncio.run(server.jmag_cancel_run())
-    assert r["ok"] is True and r["unverified_live"] is True
-    assert clicks == ["Abort", "Yes, and open results"]                       # verified order: Abort, answer, kill
-    assert killed == ["C:/p/Case1"] and any("terminated" in s for s in r["steps"])
-
-    monkeypatch.setattr(server.winui, "dialogs", lambda title_filter="": [])
-    r = asyncio.run(server.jmag_cancel_run())
-    assert r["ok"] is False and "nothing is running" in r["error"]["message"]
-
-
-def test_cancel_without_job_never_kills_an_unknown_folder(fake, monkeypatch):
-    killed = []
-    monkeypatch.setattr(server.winui, "dialogs", lambda title_filter="": (
-        [{"kind": "progress", "title": "Run Analysis", "text": ""}] if title_filter == "Run Analysis" else []))
-    monkeypatch.setattr(server.winui, "click", lambda button, title="", wait=0: {"clicked": button})
-    monkeypatch.setattr(server.sup, "solver_status", lambda folder: {
-        "solver_processes": [{"pid": 4}, {"pid": 5}], "calc_folders": ["a", "b"], "newest_monitor_age_s": 1.0,
-        "stalled": False})
-    monkeypatch.setattr(server.solver_monitor, "kill_solver", lambda folder=None: killed.append(folder) or [])
-    r = asyncio.run(server.jmag_cancel_run())
-    assert r["ok"] is True and killed == [] and any("not killed" in s for s in r["steps"])
+# cancel without a bridge job: see tests/test_review_fixes.py (connected-pid / project scoping)
 
 
 def test_status_reports_solver_fields(fake, monkeypatch):
