@@ -400,6 +400,9 @@ KNOWN_MESSAGES = [
      "Newton-Raphson hit its iteration limit at some steps. If those steps are current zero-crossings (B~0) it is "
      "usually harmless; otherwise raise NonlinearMaxIteration, refine the mesh where B changes fast, reduce the "
      "time step, try the direct solver, and check the BH curve is monotonic."),
+    ("interruption key (ctrl+c) is pressed", "error", "RUN_INTERRUPTED",
+     "The solve was stopped (Abort in 'Run Analysis' / jmag_cancel_run; seen on 23.0 as a warning of a run that "
+     "still reports has_result): the results cover only the steps before the stop. Re-run for complete results."),
     ("negative or zero", "error", "NEGATIVE_ELEMENT_VOLUME",
      "Distorted elements, usually moving parts on a normal mesh. Rotating machines: mesh MeshType=1 (slide), "
      "AutoSlide=1, CircumferentialDivision so one step moves an integer number of elements, and make sure no user "
@@ -424,6 +427,9 @@ SOLVER_ABORT_PATTERNS = (
     r"\bfail(?:ed)? to execute\b",
     r"size of point array is zero",
 )
+#: A stopped (cancelled) solve: JMAG 23.0 reports it as a run *warning* and keeps the partial results
+#: ("The interruption key (Ctrl+C) is pressed. The program will be terminated.", measured 2026-11-09).
+SOLVER_INTERRUPT_PATTERNS = (r"interruption key \(ctrl\+c\) is pressed",)
 
 
 def solver_abort_messages(run_env: dict, log_entries: Iterable[dict] | None = None) -> list[str]:
@@ -431,18 +437,22 @@ def solver_abort_messages(run_env: dict, log_entries: Iterable[dict] | None = No
 
     Looks at the errors the run op collected (``result.errors`` or ``error.data.errors``), the JMAG messages logged
     during the run (``jmag_messages``) and the Error entries of the solver's Designer.log (``log_entries`` from
-    ``solver_monitor.log_messages``). Warnings are ignored.
+    ``solver_monitor.log_messages``). Warnings are ignored, except the interruption message of a stopped solve
+    (``SOLVER_INTERRUPT_PATTERNS``): its partial results are not a finished run.
     """
     texts: list[str] = []
+    warn: list[str] = []
     for part in (run_env.get("result"), (run_env.get("error") or {}).get("data")):
         if isinstance(part, dict):
             texts += [str(t) for t in part.get("errors") or []]
+            warn += [str(t) for t in part.get("warnings") or []]
     texts += [str(t) for t in run_env.get("jmag_messages") or []]
     texts += [str(e.get("text", "")) for e in log_entries or [] if e.get("status") == "Error"]
     out: list[str] = []
-    for t in texts:
+    for t, pats in [(t, SOLVER_ABORT_PATTERNS + SOLVER_INTERRUPT_PATTERNS) for t in texts] + \
+            [(t, SOLVER_INTERRUPT_PATTERNS) for t in warn]:
         flat = " ".join(t.split())
-        if flat not in out and any(re.search(p, flat.lower()) for p in SOLVER_ABORT_PATTERNS):
+        if flat not in out and any(re.search(p, flat.lower()) for p in pats):
             out.append(flat)
     return out
 

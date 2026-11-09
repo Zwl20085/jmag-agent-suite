@@ -384,8 +384,8 @@ async def jmag_import_cad(path: str, model_name: str | None = None, healing: boo
 async def jmag_list_parts(model: str | None = None) -> dict:
     """Parts of a model: id, name, centroid [x, y, z]; 2D also area and inside_point [x, y] (a point inside the part,
     unlike the centroid of C/L shapes), 3D volume. Coordinates in the model length unit (mm unless imported otherwise).
-    Area and volume are JMAG's raw values; mm^2 / mm^3 for a mm model is expected but UNVERIFIED, so compare one part
-    with your own geometry first. inside_point works as the "part" reference in later calls. Blocks up to 60 s.
+    Area is mm^2 for a mm model (verified on 23.0: SPM slot 139.27727 mm^2 = analytic); volume is in the model unit
+    cubed (3D CAD volumes matched the CAD to < 2e-5). inside_point works as the "part" reference in later calls. Blocks up to 60 s.
     """
     return await run_op("list_parts", 60, model=model)
 
@@ -1008,9 +1008,14 @@ async def jmag_cancel_run() -> dict:
     Protocol (verified on JMAG 23): press Abort in the 'Run Analysis' window -> answer the 'Stop calculation' prompt
     -> if the solver process is still alive after 10 s, terminate the ExecSolver/jam tree -> release the runner.
     Killing the solver *before* answering JMAG's prompt can take Designer down, hence this order.
-    The study is left without results; re-run it after fixing whatever made you cancel.
-    No bridge-owned run (server restart, GUI-started solve) but a 'Run Analysis' window is open: the same
-    protocol runs; the solver tree is only killed when exactly one solver calc folder is found (unverified live).
+    Answering 'Yes, and open results' keeps the steps solved so far (JMAG-Designer 23.0, 2026-11-09: has_result
+    true, run warning "The interruption key (Ctrl+C) is pressed"); jmag_run_status then reports
+    solver_aborted=true / ok=false and the post-check RUN_INTERRUPTED: treat them as incomplete and re-run.
+    No bridge-owned run (server restart, GUI-started solve) but a 'Run Analysis' window of the connected JMAG is
+    open: the same protocol runs on that instance only. Verified on 23.0 (2026-11-09, 2D SPM, 4001-step run
+    stopped at step ~800): Abort -> 'Yes, and open results' -> the solver exited by itself within the 10 s wait,
+    Designer stayed alive, about 13 s in all. The kill fallback (exactly one calc folder of the connected project)
+    was not needed there and is not verified live.
     """
     job = B.job
     if not job:
@@ -1038,7 +1043,8 @@ async def jmag_cancel_run() -> dict:
 
 
 async def _cancel_unowned() -> dict:
-    """jmag_cancel_run without any bridge job (server restart, GUI-started solve; unverified live).
+    """jmag_cancel_run without any bridge job (server restart, GUI-started solve; verified on 23.0 2026-11-09
+    up to the kill fallback, which was not needed).
 
     Acts on the connected JMAG instance only: its pid (app_info, else the remembered pid) filters the windows, and
     the solver tree is killed only when exactly one solver calc folder lies in that instance's project
@@ -1059,7 +1065,7 @@ async def _cancel_unowned() -> dict:
     status = await _solver_status()
     every = status.get("calc_folders") or []
     folders = [f for f in every if sup.folder_in_project(f, project)]
-    steps: list[str] = [f"no bridge-owned run: using the 'Run Analysis' window of pid {pid} (unverified live path)"]
+    steps: list[str] = [f"no bridge-owned run: using the 'Run Analysis' window of pid {pid}"]
     if len(folders) == 1:
         await _abort_protocol(folders[0], steps, pid)
     else:  # never kill solvers that cannot be tied to this instance's project
@@ -1067,8 +1073,9 @@ async def _cancel_unowned() -> dict:
         steps.append(f"solver tree not killed: {len(folders)} calc folder(s) of project {project!r} among {every}; "
                      "check jmag_status.solver_processes")
     leftover = await asyncio.to_thread(winui.dialogs, "", pid=pid)
-    return {"ok": True, "steps": steps, "dialogs_left": leftover, "unverified_live": True,
-            "hint": "confirm with jmag_status that solver_processes is empty; inspect dialogs_left with jmag_dialogs"}
+    return {"ok": True, "steps": steps, "dialogs_left": leftover, "owned": False,
+            "hint": "confirm with jmag_status that solver_processes is empty; inspect dialogs_left with jmag_dialogs; "
+                    "the study keeps only the steps solved before the stop"}
 
 
 @mcp.tool()
@@ -1629,7 +1636,10 @@ async def jmag_estimate(kind: str, params: dict | None = None) -> dict:
       step_plan {"rpm": 3000, "poles": 10, "steps_per_period": 60, "periods": 2, "slots": 12}  -> jmag_set_step args
       iron_loss_steinmetz {"kh": 0.025, "ke": 4e-5, "B": 1.5, "f": 250, "mass_kg": 2.1}
       dq_to_phase {"id": -20, "iq": 50, "theta_e_deg": 0} -> phase currents U/V/W and a jmag_circuit_quick source
-          {"type": "sin", "amplitude", "phase"} (PhaseU convention unverified live: check i_U(t=0))
+          {"type": "sin", "amplitude", "phase"}. Verified on 23.0 (12s/4p SPM): the 3-phase source gives
+          i_U(t=0) = amplitude * sin(PhaseU), U-V-W sequence; id=0, iq=10 A at theta_e_deg = 90 (the no-load flux
+          vector angle at t=0) gave PhaseU -90 and the maximum torque 1.774 Nm (1.536 / 1.536 Nm at +-30 deg).
+          theta_e_deg = angle of the no-load flux-linkage vector at t=0: phase_to_dq of psi_abc(0) has q = 0 there.
       phase_to_dq {"abc": [ia, ib, ic], "theta_e_deg": 30} -> d, q (amplitude-invariant Park, d axis at theta_e
           from the phase-U axis; same transform as jmag_experiment's Ld/Lq)
     """

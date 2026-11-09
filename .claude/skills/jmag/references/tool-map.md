@@ -83,7 +83,8 @@ Tools marked (new) were added with the skill family; read their description befo
   `ok` is false when the run failed or `solver_aborted` is true (JMAG's messages say the solver aborted): no usable
   results even if `state` is `finished`. Without a bridge-owned run (server restart, GUI solve): `owned: false`,
   `state: running` while a solver or 'Run Analysis' window exists, else `state: none` (ok false).
-- `jmag_cancel_run` - safe cancel (Abort -> answer the prompt -> only then terminate the solver). Also works without a bridge-owned job when a Run Analysis window exists (unverified live).
+- `jmag_cancel_run` - safe cancel (Abort -> answer the prompt -> only then terminate the solver). Also works without a bridge-owned job when the connected JMAG shows a Run Analysis window (verified on 23.0;
+  the study keeps the steps solved so far, flagged RUN_INTERRUPTED / solver_aborted).
 - `jmag_solver_report(study)` - solver errors/warnings, element count, calc folder.
 
 ## Standard tests

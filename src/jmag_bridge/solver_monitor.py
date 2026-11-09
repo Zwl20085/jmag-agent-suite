@@ -79,8 +79,13 @@ def log_messages(folder: str | os.PathLike, statuses=("Warning", "Error")) -> li
     return out
 
 
-#: Solver executables: ExecSolver.exe <calc folder>/Designer.jcf starts jam.exe (the solver proper).
-SOLVER_EXES = ("ExecSolver.exe", "jam.exe")
+#: Solver executables, as seen on JMAG-Designer 23.0 (2026-11-09, 2D Transient with rotation): designer.exe starts
+#: jcwrap.exe "<console title>" <calc folder> "<install>/ExecSolver.exe" <calc folder>/Designer.jcf, which starts
+#: "<install>/ExecSolver.exe" <calc folder>/Designer.jcf (unquoted path, forward slashes, trailing space). Its
+#: children are the solver modules: mg2dnv.exe -rotation (2D mesh / rotation, first run of a study) and jam.exe
+#: (no arguments). jam.exe "100 . 0" was also seen under a short-lived parent. Only ExecSolver.exe and jcwrap.exe
+#: name the calc folder; killing the ExecSolver tree (taskkill /T) also ends mg2dnv / jam.
+SOLVER_EXES = ("ExecSolver.exe", "jam.exe", "mg2dnv.exe")
 
 # A .jcf argument: quoted, or an absolute drive/UNC path that may contain spaces (the match starts at the last
 # drive root before ".jcf", so an executable path earlier on the line is not swallowed), or a bare token.

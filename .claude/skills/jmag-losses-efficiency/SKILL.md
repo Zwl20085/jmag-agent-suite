@@ -63,8 +63,9 @@ those points against `P_out / (P_out + P_loss)` from the point runs. Sweeps of y
 3. Fallback (own map): `jmag_case_table` over (id, iq) cases; compute the grid of phase currents with
    `jmag_estimate(kind="dq_to_phase", params={"id": A, "iq": A, "theta_e_deg": deg})` (peak amperes; theta_e = the
    d-axis electrical angle from the phase-U axis at t = 0). It returns `details.phase_currents_A` and
-   `details.circuit_source` = `{amplitude, phase}`; add amplitude and phase (`PhaseU`) to the table (the PhaseU
-   convention is **unverified live**: check i_U(t=0) of one case with `jmag_get_result`); then
+   `details.circuit_source` = `{amplitude, phase}`; add amplitude and phase (`PhaseU`) to the table (verified on
+   23.0: i_U(t=0) = amplitude sin(PhaseU); theta_e_deg = the angle of the no-load flux-linkage vector at t = 0,
+   i.e. where `phase_to_dq` of psi_abc(0) gives q = 0); then
    `jmag_run_cases(method='loop')` and
    `jmag_loss_study` per case (frequency from the speed).
 4. Read torque and flux per case and convert with

@@ -1,0 +1,6 @@
+70180	ExecSolver.exe	"C:/Program Files/JMAG-Designer23.0/ExecSolver.exe" C:/work/live1/spm.jfiles/SPM~1/Load~1/Case1/Designer.jcf
+5044	mg2dnv.exe	"C:/Program Files/JMAG-Designer23.0\mg2dnv.exe" -rotation
+44928	jam.exe	"C:/Program Files/JMAG-Designer23.0\jam.exe"  100 . 0
+54688	ExecSolver.exe	"C:/Program Files/JMAG-Designer23.0/ExecSolver.exe" C:/work/live1/spm.jfiles/SPM~1/BEMF~2/Case1/Designer.jcf
+35728	jam.exe	"C:/Program Files/JMAG-Designer23.0\jam.exe"
+68312	jcwrap.exe	"C:\Program Files\JMAG-Designer23.0\jcwrap.exe"  "JMAG-Express Wrapper Console Info00000165BFF40550" C:/work/live1/spm.jfiles/SPM~1/Load~1/Case1 "C:/Program Files/JMAG-Designer23.0/ExecSolver.exe" C:/work/live1/spm.jfiles/SPM~1/Load~1/Case1/Designer.jcf
