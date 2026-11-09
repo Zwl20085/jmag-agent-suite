@@ -2080,6 +2080,25 @@ def _calc_folder_of(s):
         return None
 
 
+# Copy of health.SOLVER_INTERRUPT_PATTERNS (the worker does not import the server package): a solve stopped with
+# Abort keeps its partial result and only says "The interruption key (Ctrl+C) is pressed." (23.0, 2026-11-09).
+_INTERRUPT_RE = re.compile(r"interrupt(?:ion)? key \( ?ctrl ?\+ ?c ?\) (?:is|was|has been) pressed")
+
+
+def _interrupted(messages):
+    return any(_INTERRUPT_RE.search(" ".join(str(m).lower().split())) for m in messages or [])
+
+
+def _case_state(s, c, msgs, cancelled):
+    """'finished' only for a case with results that was neither stopped (interrupt message) nor solving when the
+    job was cancelled; a cancel during the solve keeps partial results without any message."""
+    if not s.CaseHasResult(c):
+        return "failed"
+    if cancelled or _interrupted(msgs.get("errors")) or _interrupted(msgs.get("warnings")):
+        return "interrupted"
+    return "finished"
+
+
 def _write_progress(path, data):
     if not path:
         return
@@ -2139,8 +2158,14 @@ def run_cases(ctx, study, cases=None, overwrite=True, method="loop", progress_fi
         finally:
             for c in range(n):
                 t.SetActive(c, 1 if old[c] else 0)
+        # RunAllCases gives no per-case report; after a cancel it is unknown which case was stopped, so every case
+        # with results is reported interrupted (conservative) rather than finished.
+        stopped = bool(cancel_file and os.path.exists(cancel_file))
         for c in sel:
-            rows.append({"case": c, "state": "finished" if s.CaseHasResult(c) else "failed"})
+            row = {"case": c, "state": _case_state(s, c, {}, stopped)}
+            if row["state"] == "interrupted":
+                row["reason"] = "the job was cancelled during RunAllCases; which case was stopped is unknown"
+            rows.append(row)
     else:
         try:
             for k, c in enumerate(sel):
@@ -2158,10 +2183,16 @@ def run_cases(ctx, study, cases=None, overwrite=True, method="loop", progress_fi
                 _write_progress(progress_file, state)
                 t0 = time.time()
                 s.Run()
-                row = {"case": c, "state": "finished" if s.CaseHasResult(c) else "failed",
+                msgs = _report_messages(s)
+                stopped = bool(cancel_file and os.path.exists(cancel_file))
+                row = {"case": c, "state": _case_state(s, c, msgs, stopped),
                        "seconds": round(time.time() - t0, 2), "calc_folder": folder}
-                row.update(_report_messages(s))
+                row.update(msgs)
+                if row["state"] == "interrupted":
+                    row["reason"] = ("cancelled while this case was solving" if stopped else
+                                     "the solver reports an interruption") + ": partial results, re-run this case"
                 rows.append(row)
+                state.update(current_case=None)   # between cases: a cancel now stops no solve
                 _write_progress(progress_file, state)
         finally:
             if s.GetCurrentCase() != prev:
@@ -2170,8 +2201,10 @@ def run_cases(ctx, study, cases=None, overwrite=True, method="loop", progress_fi
     _write_progress(progress_file, state)
     out = {"study": s.GetName(), "method": method, "cases": rows, "seconds": round(time.time() - t_all, 2),
            "finished": [r["case"] for r in rows if r.get("state") == "finished"],
-           "failed": [r["case"] for r in rows if r.get("state") == "failed"]}
-    if sel and not out["finished"] and not any(r.get("state") in ("skipped", "cancelled") for r in rows):
+           "failed": [r["case"] for r in rows if r.get("state") == "failed"],
+           "interrupted": [r["case"] for r in rows if r.get("state") == "interrupted"]}
+    if sel and not out["finished"] and not any(r.get("state") in ("skipped", "cancelled", "interrupted")
+                                               for r in rows):
         raise OpError("no case produced results", "read the per-case errors below and the solver log", data=out)
     return out
 

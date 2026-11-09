@@ -13,7 +13,7 @@ Sources: `src/jmag_bridge/ps/dialogs.ps1`, `winui.py`, `jmag_cancel_run`, `docs/
 
 | Dialog (title) | kind | What it is | Safe button | Status |
 |---|---|---|---|---|
-| `Run Analysis` | progress | solve progress window with an Abort button | **none: leave it alone.** Stop with `jmag_cancel_run` | verified |
+| `JMAG-Designer: Run Analysis` | progress | solve progress window; buttons "Customize Monitor..." and "Abort" only (no Cancel) | **none: leave it alone.** Stop with `jmag_cancel_run` | verified (23.0, 2026-11-09) |
 | `Stop calculation` | modal | prompt raised by Abort; `jmag_cancel_run` answers it with `Yes, and open results` | only inside `jmag_cancel_run`; do not answer by hand unless the bridge lost the job (section 4) | verified (button label used by the bridge) |
 | save-project prompt when the Geometry Editor starts | modal | project was never saved | `Cancel`, then `jmag_save_project` / `jmag_new_project` and retry the import | behaviour verified (facts.md); exact title unverified |
 | overwrite confirmation (existing results, files) | modal | JMAG asks before overwriting | `No` / `Cancel` unless the user asked to overwrite | unverified |
@@ -47,8 +47,10 @@ unverified; compare with the elapsed time per step in earlier runs of the same m
 The engineer started the solve by hand, or the bridge restarted and lost the job (`jmag_run_status` says
 "no run started in this session"):
 
-- `jmag_cancel_run` is meant to work without a bridge-owned job when a `Run Analysis` window exists
-  (**unverified live**). Try it once; read `steps` in its answer.
+- `jmag_cancel_run` works without a bridge-owned job when the connected JMAG shows a `Run Analysis` window
+  (verified on 23.0, 2026-11-09: Abort, 'Yes, and open results', the solver ended within 10 s, Designer stayed
+  alive). It acts on the connected instance only; read `steps` in its answer. The study keeps the steps solved so
+  far: they are incomplete (RUN_INTERRUPTED).
 - If it reports nothing to cancel: `jmag_dialogs` shows whether `Run Analysis` is present. If it is,
   ask the user to press Abort themselves and answer `Stop calculation`.
 - Do not terminate `ExecSolver` / `jam` processes before the `Stop calculation` prompt is answered (crashed Designer).

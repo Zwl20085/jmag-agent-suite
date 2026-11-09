@@ -16,6 +16,9 @@ def test_versions_agree():
     assert pyproject and changelog
     assert pyproject.group(1) == __version__ == plugin == changelog.group(1), (
         pyproject.group(1), __version__, plugin, changelog.group(1))
+    for name in ("README.md", "README.zh-CN.md"):
+        badge = re.search(r"badge/version-([0-9.]+)-", (ROOT / name).read_text(encoding="utf-8"))
+        assert badge and badge.group(1) == __version__, (name, badge and badge.group(1), __version__)
 
 
 def _tools_table(path: Path) -> set[str]:

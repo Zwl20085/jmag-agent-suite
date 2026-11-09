@@ -205,6 +205,43 @@ Details: `jmag-experiments` -> `references/pmsm.md` section 2c; `static-3d-nonli
 - `study.WriteMeshJcf` mesh of the first run: 1713 elements carry part id 22 where the jplot has 20 (same element
   ids, types and centres); taking the part ids from the jplot gives the same parts and max |B| as the run's file.
 
+## Runs, cancel, processes and dq convention (measured 2026-11-09, JMAG-Designer 23.0.01zv, 12s/4p SPM Transient2D)
+
+Model: `examples/spm_motor` (1500 rpm, 50 Hz, 10 A peak, 60 steps per period, 27 379 elements). Everything below
+is "(JMAG-Designer 23.0, 2026-11-09)".
+
+- 3-phase current source convention: i_U(t) = Amplitude sin(2 pi f t + PhaseU), positive sequence U-V-W. With
+  PhaseU -90 the currents at t = 0 were U -10.000, V +5.000, W +5.000 A; at the next step (6 deg) U -9.945,
+  V +4.068, W +5.877 A, exactly 10 sin(-90 + 6 - k 120 deg).
+- d-axis angle: the no-load flux-linkage vector of this model points at 90.0 deg electrical at t = 0 (from
+  `jmag_experiment(kind='back_emf')`; `phase_to_dq` of psi_abc(0) has q = 0 there) and advances with the rotation.
+  `jmag_estimate(kind='dq_to_phase', {id: 0, iq: 10, theta_e_deg: 90})` gives PhaseU -90 deg; load points at
+  PhaseU -90 / -60 / -120 gave 1.7741 / 1.5365 / 1.5357 N m (cos 30 deg ratio 0.866), so the iq-only current from
+  `dq_to_phase` is the maximum-torque angle of this surface-PM machine. `phase_to_dq` of the measured currents at
+  t = 0 returned d = -5e-8, q = 10.000 A. Power balance 0.11 % at the optimum.
+- Solver process tree of a run: designer.exe -> jcwrap.exe "JMAG-Express Wrapper Console Info..." <calc folder>
+  "<install>/ExecSolver.exe" <calc folder>/Designer.jcf -> "<install>/ExecSolver.exe" <calc folder>/Designer.jcf
+  (calc folder unquoted, forward slashes, trailing space) -> mg2dnv.exe -rotation (first solve of a study) and/or
+  jam.exe (no arguments). Once jam.exe "100 . 0" ran under a short-lived parent outside the ExecSolver tree.
+  Fixture: `tests/fixtures/solver_cmdlines.txt`.
+- Run Analysis window: title "JMAG-Designer: Run Analysis", listed by `jmag_dialogs` with kind 'progress' and the
+  buttons "Customize Monitor..." and "Abort" only (no Cancel). Its text carries Study Title, Elapsed / Expected /
+  Remaining Time, Current Case and Current Step ("769/4001"). `dialogs.ps1 -OwnerPid <pid>` listed it for the
+  owning pid and nothing for another pid.
+- Monitor file age during a 2D run of ~8 steps/s: `last_write_age_s` / `newest_monitor_age_s` 0.0-0.1 s at every
+  sample over 75 s; `stalled` stayed false. (Long 3D solves not measured: the 600 s threshold is still a guess there.)
+- Cancel without a bridge job (B.job cleared during a 4001-step run, simulating a server restart): `jmag_cancel_run`
+  pressed Abort in the connected pid's window, answered 'Yes, and open results', the ExecSolver/jam processes ended
+  by themselves within the 10 s wait (no kill), Designer stayed alive and answered `app_info`; 13 s in all. The run
+  op then returned ok with has_result true (partial results), 111 s solve time and the warning "The interruption
+  key (Ctrl+C) is pressed. The program will be terminated." -> the bridge now classifies it as RUN_INTERRUPTED /
+  solver_aborted. With the finished job back in place `jmag_cancel_run` answered "nothing is running".
+- `jmag_list_parts` area is mm^2 for a mm model: Slot01 139.27727 mm^2 vs analytic (45^2 - 31^2) pi 15/360 =
+  139.27727; Magnet1 119.38051 vs 119.38052; RotorCore 2290.2209 vs pi 27^2 = 2290.2210.
+- MCP stdio: the MCP Python SDK starts the server with a reduced environment (`get_default_environment()`), so a
+  `JMAG_BRIDGE_HOME` set in the client's shell does not reach a server started through `StdioServerParameters`
+  unless `env=` passes it; `examples/spm_motor/run_mcp.py` used the default state folder.
+
 ## Open questions (unverified)
 
 Things the repository does not yet know. Do not state them as facts; settle them on a real JMAG and move the answer
@@ -213,17 +250,15 @@ into the sections above.
 - `replay.py` (journal -> script) targeting a second model: the script replays each op with the arguments the
   journal recorded (`model` only when the original call passed one) against whatever model is current when it
   runs, so a replay into a project with a second model may act on the wrong one; not tried.
-- Run Analysis window: does Cancel (as opposed to Abort) exist and what does it do? The bridge only presses Abort
-  and answers "Stop calculation"; pressing Cancel there is forbidden by the skills.
-- `jmag_cancel_run` without a bridge-owned job when a Run Analysis window exists (the runner was lost or the engineer
-  started the solve): designed, not yet run live.
-- Typical `last_write_age_s` / `newest_monitor_age_s` of the solver monitor files during long 3D solves: the
-  threshold behind `stalled` has no measured basis for 600 k-element models.
+- `jmag_cancel_run`'s kill fallback (solver still alive 10 s after the prompt was answered) without a bridge job:
+  in the 2026-11-09 test the solver exited by itself, so the kill of the one project calc folder was not exercised.
+- Typical `last_write_age_s` / `newest_monitor_age_s` during long 3D solves: the threshold behind `stalled` has no
+  measured basis for 600 k-element models (2D: 0.0-0.1 s, see above).
 - The MCP client's own tool timeout (Claude Code and other clients): unknown, so the skills say "keep
   `wait_seconds` below it" without a number.
 - `jmag_efficiency_map` on an existing IPM project: API signatures only; no efficiency-map study was ever created
   or evaluated through the bridge.
-- `jmag_list_parts` area and volume units: `Part.Area()` / `Part.Volume()` are returned raw; mm^2 / mm^3 for a mm
-  model is expected, not measured against a known geometry in this repo (the 3D CAD volumes matched to < 2e-5, so
-  volumes are consistent with the CAD unit; the 2D area unit is not stated anywhere).
-- Name clash in `jmag_duplicate_study` (also hit by `jmag_experiment` re-runs).
+- What JMAG itself does on a `DuplicateStudyName` name clash: the bridge refuses an existing name before calling
+  JMAG (0.4.0), so JMAG's behaviour was never observed.
+- Meshing or importing from a second (runner) connection, which a `wait_seconds` mode for `jmag_mesh` /
+  `jmag_import_cad` would need: not tried.

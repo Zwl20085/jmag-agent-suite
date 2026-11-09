@@ -384,8 +384,8 @@ async def jmag_import_cad(path: str, model_name: str | None = None, healing: boo
 async def jmag_list_parts(model: str | None = None) -> dict:
     """Parts of a model: id, name, centroid [x, y, z]; 2D also area and inside_point [x, y] (a point inside the part,
     unlike the centroid of C/L shapes), 3D volume. Coordinates in the model length unit (mm unless imported otherwise).
-    Area and volume are JMAG's raw values; mm^2 / mm^3 for a mm model is expected but UNVERIFIED, so compare one part
-    with your own geometry first. inside_point works as the "part" reference in later calls. Blocks up to 60 s.
+    Area is mm^2 for a mm model (verified on 23.0: SPM slot 139.27727 mm^2 = analytic); volume is in the model unit
+    cubed (3D CAD volumes matched the CAD to < 2e-5). inside_point works as the "part" reference in later calls. Blocks up to 60 s.
     """
     return await run_op("list_parts", 60, model=model)
 
@@ -764,9 +764,15 @@ async def _post(study: str, model: str | None, electrical_frequency_hz: float | 
         electrical_frequency_hz = derived["hz"] if derived else None
     torque_cond = (any(c.get("type") in ("Torque", "Torque_Surface", "LorentzTorque") for c in facts.get("conditions", []))
                    if facts.get("conditions") is not None else None)
+    if not info.get("calc_folder") and run_env and isinstance(run_env.get("result"), dict):
+        info["calc_folder"] = run_env["result"].get("calc_folder")
     conv = None
+    steps_done = None
     if info.get("calc_folder"):
         conv = solver_monitor.convergence(info["calc_folder"], facts.get("nonlinear_max_iteration"))
+        if str(facts.get("type", "")).startswith("Transient"):   # jmonitor counts time steps of a transient run
+            pr = solver_monitor.progress(info["calc_folder"])
+            steps_done = pr.get("steps_done") if pr.get("monitor_found") else None
     tables: dict = {}
     if info.get("has_result"):
         lr = await run_op("list_results", 120, study=study, model=model)
@@ -775,7 +781,7 @@ async def _post(study: str, model: str | None, electrical_frequency_hz: float | 
             if r["ok"]:
                 tables[t["title"]] = r["result"]
     findings = health.postflight(info, conv, tables, electrical_frequency_hz, (facts.get("step") or {}).get("Step"),
-                                 has_torque_condition=torque_cond)
+                                 has_torque_condition=torque_cond, steps_done=steps_done)
     if derived:
         findings.append({"level": "info", "code": "FE_DERIVED",
                          "message": f"electrical frequency {derived['hz']:.6g} Hz taken from {derived['source']}",
@@ -900,6 +906,8 @@ async def jmag_run_status() -> dict:
     ok is true while the solve runs and when it finished with results; false when it failed, and also when JMAG's
     messages say the solver aborted (solver_aborted=true, e.g. "The solver module jam was aborted", "jam.exe failed to
     execute", "Size of point array is zero") even if the study still reports results: treat them as unusable.
+    Also false with run_incomplete=true when the solver's jmonitor counted fewer steps than configured on a
+    Transient run without a step-retiming message (post finding RUN_INCOMPLETE; unverified live).
 
     No run started by this bridge (after a server restart, or a solve started in the GUI): returns state='running'
     with owned=false when a solver process or a 'Run Analysis' window exists (ok=true), else ok=false with
@@ -947,13 +955,20 @@ async def jmag_run_status() -> dict:
         st["solver_log_warnings"] = log[:20]
     aborted = health.solver_abort_messages(resp, log)
     st["solver_aborted"] = bool(aborted)
-    st["ok"] = bool(resp.get("ok")) and not aborted
+    short = next((f for f in ((job["post"].get("health") or {}).get("findings") or [])
+                  if f.get("code") == "RUN_INCOMPLETE"), None)
+    st["run_incomplete"] = bool(short)
+    st["ok"] = bool(resp.get("ok")) and not aborted and not short
     if not st["ok"]:
         run_err = resp.get("error") or {}
         hint = ("no usable results: read run.error, post.health and solver_log_warnings, fix the model (often a "
                 "material curve, the mesh or a condition), then jmag_run again")
-        st["error"] = ({"message": f"the solver aborted: {aborted[0]}", "hint": hint} if aborted else
-                       {"message": run_err.get("message") or "the run failed", "hint": run_err.get("hint") or hint})
+        if aborted:
+            st["error"] = {"message": f"the solver aborted: {aborted[0]}", "hint": hint}
+        elif short and resp.get("ok"):
+            st["error"] = {"message": f"RUN_INCOMPLETE: {short['message']}", "hint": short.get("fix") or hint}
+        else:
+            st["error"] = {"message": run_err.get("message") or "the run failed", "hint": run_err.get("hint") or hint}
     return st
 
 
@@ -988,17 +1003,35 @@ async def _press_abort(steps: list[str], pid: int | None) -> None:
             await asyncio.sleep(0.5)
 
 
-async def _abort_protocol(folder: str | None, steps: list[str], pid: int | None = None) -> None:
+async def _abort_protocol(folder: str | None, steps: list[str], pid: int | None = None) -> bool:
     """The verified stop order: Abort in 'Run Analysis' -> answer 'Stop calculation' -> wait up to 10 s for the
-    solver -> only then terminate the ExecSolver/jam tree working in `folder`. Appends what it did to steps."""
+    solver -> only then terminate the ExecSolver/jam tree working in `folder`. Appends what it did to steps.
+
+    Returns solver_stopped_verified: True only when a solver process matched `folder` before the Abort and none is
+    left at the end. Without a folder nothing is waited for or killed (solver_processes(None) is every solver on the
+    machine); when no process matched the folder (already gone, or e.g. an 8.3 short path on the command line) the
+    stop is reported as not verified instead of complete."""
+    if not folder:
+        await _press_abort(steps, pid)
+        steps.append("solver tree not killed: the calc folder of this run is unknown, so its solver process cannot "
+                     "be told apart from other solves on this machine")
+        return False
+    matched = await asyncio.to_thread(solver_monitor.solver_processes, folder)
     await _press_abort(steps, pid)
+    if not matched:
+        steps.append(f"no solver process matched calc folder {folder!r}; not verified stopped")
+        return False
     for _ in range(20):
         if not await asyncio.to_thread(solver_monitor.solver_processes, folder):
-            break
+            return True
         await asyncio.sleep(0.5)
-    else:
-        killed = await asyncio.to_thread(solver_monitor.kill_solver, folder)
-        steps.append(f"terminated solver processes {killed}")
+    killed = await asyncio.to_thread(solver_monitor.kill_solver, folder)
+    steps.append(f"terminated solver processes {killed}")
+    return not await asyncio.to_thread(solver_monitor.solver_processes, folder)
+
+
+_NOT_VERIFIED_HINT = ("the solver was not verified stopped: check jmag_status.solver_processes (and stalled); if a "
+                      "solver of this project still runs, wait or end it in Task Manager")
 
 
 @mcp.tool()
@@ -1008,9 +1041,18 @@ async def jmag_cancel_run() -> dict:
     Protocol (verified on JMAG 23): press Abort in the 'Run Analysis' window -> answer the 'Stop calculation' prompt
     -> if the solver process is still alive after 10 s, terminate the ExecSolver/jam tree -> release the runner.
     Killing the solver *before* answering JMAG's prompt can take Designer down, hence this order.
-    The study is left without results; re-run it after fixing whatever made you cancel.
-    No bridge-owned run (server restart, GUI-started solve) but a 'Run Analysis' window is open: the same
-    protocol runs; the solver tree is only killed when exactly one solver calc folder is found (unverified live).
+    Answering 'Yes, and open results' keeps the steps solved so far (JMAG-Designer 23.0, 2026-11-09: has_result
+    true, run warning "The interruption key (Ctrl+C) is pressed"); jmag_run_status then reports
+    solver_aborted=true / ok=false and the post-check RUN_INTERRUPTED: treat them as incomplete and re-run.
+    No bridge-owned run (server restart, GUI-started solve) but a 'Run Analysis' window of the connected JMAG is
+    open: the same protocol runs on that instance only. Verified on 23.0 (2026-11-09, 2D SPM, 4001-step run
+    stopped at step ~800): Abort -> 'Yes, and open results' -> the solver exited by itself within the 10 s wait,
+    Designer stayed alive, about 13 s in all. The kill fallback (exactly one calc folder of the connected project)
+    was not needed there and is not verified live.
+    The kill fallback only ever targets the solver working in this run's calc folder: if that folder is unknown
+    nothing is killed (other solves on the machine survive) and the steps say so. solver_stopped_verified is true
+    only when a solver of that folder was seen before Abort and is gone afterwards; false (no folder, or no process
+    matched it, e.g. an 8.3 short path) means "not verified stopped": check jmag_status.solver_processes.
     """
     job = B.job
     if not job:
@@ -1020,8 +1062,11 @@ async def jmag_cancel_run() -> dict:
                                        "hint": "the last run of this bridge has finished; jmag_run_status shows it"}}
     if job.get("kind") == "cases":  # stop starting new cases; kill target = current case folder
         _cases_cancel_prepare(job)
+    elif not job.get("folder"):    # jmag_run whose calc_folder lookup failed at start: try once more
+        r = await run_op("calc_folder", 60, study=job["study"], model=job.get("model"))
+        job["folder"] = (r.get("result") or {}).get("folder") if r.get("ok") else None
     steps: list[str] = []
-    await _abort_protocol(job.get("folder"), steps, job.get("pid"))
+    verified = await _abort_protocol(job.get("folder"), steps, job.get("pid"))
     for _ in range(60):
         if job.get("done"):
             break
@@ -1033,12 +1078,14 @@ async def jmag_cancel_run() -> dict:
         job["finished"] = time.time()
         job["response"] = {"ok": False, "error": {"message": "cancelled by user"}}
     leftover = await asyncio.to_thread(winui.dialogs)
-    return {"ok": True, "steps": steps, "dialogs_left": leftover,
-            "hint": "if dialogs_left is not empty, inspect/close them with jmag_dialogs"}
+    hint = "if dialogs_left is not empty, inspect/close them with jmag_dialogs"
+    return {"ok": True, "steps": steps, "dialogs_left": leftover, "solver_stopped_verified": verified,
+            "hint": hint if verified else f"{_NOT_VERIFIED_HINT}; {hint}"}
 
 
 async def _cancel_unowned() -> dict:
-    """jmag_cancel_run without any bridge job (server restart, GUI-started solve; unverified live).
+    """jmag_cancel_run without any bridge job (server restart, GUI-started solve; verified on 23.0 2026-11-09
+    up to the kill fallback, which was not needed).
 
     Acts on the connected JMAG instance only: its pid (app_info, else the remembered pid) filters the windows, and
     the solver tree is killed only when exactly one solver calc folder lies in that instance's project
@@ -1059,16 +1106,18 @@ async def _cancel_unowned() -> dict:
     status = await _solver_status()
     every = status.get("calc_folders") or []
     folders = [f for f in every if sup.folder_in_project(f, project)]
-    steps: list[str] = [f"no bridge-owned run: using the 'Run Analysis' window of pid {pid} (unverified live path)"]
+    steps: list[str] = [f"no bridge-owned run: using the 'Run Analysis' window of pid {pid}"]
+    verified = False
     if len(folders) == 1:
-        await _abort_protocol(folders[0], steps, pid)
+        verified = await _abort_protocol(folders[0], steps, pid)
     else:  # never kill solvers that cannot be tied to this instance's project
         await _press_abort(steps, pid)
         steps.append(f"solver tree not killed: {len(folders)} calc folder(s) of project {project!r} among {every}; "
                      "check jmag_status.solver_processes")
     leftover = await asyncio.to_thread(winui.dialogs, "", pid=pid)
-    return {"ok": True, "steps": steps, "dialogs_left": leftover, "unverified_live": True,
-            "hint": "confirm with jmag_status that solver_processes is empty; inspect dialogs_left with jmag_dialogs"}
+    return {"ok": True, "steps": steps, "dialogs_left": leftover, "owned": False, "solver_stopped_verified": verified,
+            "hint": "confirm with jmag_status that solver_processes is empty; inspect dialogs_left with jmag_dialogs; "
+                    "the study keeps only the steps solved before the stop"}
 
 
 @mcp.tool()
@@ -1629,7 +1678,10 @@ async def jmag_estimate(kind: str, params: dict | None = None) -> dict:
       step_plan {"rpm": 3000, "poles": 10, "steps_per_period": 60, "periods": 2, "slots": 12}  -> jmag_set_step args
       iron_loss_steinmetz {"kh": 0.025, "ke": 4e-5, "B": 1.5, "f": 250, "mass_kg": 2.1}
       dq_to_phase {"id": -20, "iq": 50, "theta_e_deg": 0} -> phase currents U/V/W and a jmag_circuit_quick source
-          {"type": "sin", "amplitude", "phase"} (PhaseU convention unverified live: check i_U(t=0))
+          {"type": "sin", "amplitude", "phase"}. Verified on 23.0 (12s/4p SPM): the 3-phase source gives
+          i_U(t=0) = amplitude * sin(PhaseU), U-V-W sequence; id=0, iq=10 A at theta_e_deg = 90 (the no-load flux
+          vector angle at t=0) gave PhaseU -90 and the maximum torque 1.774 Nm (1.536 / 1.536 Nm at +-30 deg).
+          theta_e_deg = angle of the no-load flux-linkage vector at t=0: phase_to_dq of psi_abc(0) has q = 0 there.
       phase_to_dq {"abc": [ia, ib, ic], "theta_e_deg": 30} -> d, q (amplitude-invariant Park, d axis at theta_e
           from the phase-U axis; same transform as jmag_experiment's Ld/Lq)
     """
@@ -2139,6 +2191,37 @@ def _cases_cancel_prepare(job: dict) -> None:
     prog = _read_progress(job)
     if prog.get("folder"):
         job["folder"] = prog["folder"]
+    if prog.get("current_case") is not None:   # the case being solved now: never report it as finished
+        job["cancelled_case"] = prog["current_case"]
+
+
+def _case_interrupted(job: dict, row: dict) -> str | None:
+    """Why a case row the worker called 'finished' is really a stopped solve (None = it is not): the case was
+    solving when jmag_cancel_run came, the solver messages say it was interrupted/aborted, or (Transient, no
+    retiming message) its jmonitor counts fewer steps than configured."""
+    if row.get("state") != "finished":
+        return None
+    if job.get("cancelled_case") is not None and row.get("case") == job["cancelled_case"]:
+        return "cancelled while this case was solving"
+    aborted = health.solver_abort_messages({"result": {"errors": row.get("errors"), "warnings": row.get("warnings")}})
+    if aborted:
+        return f"the solver reports: {aborted[0]}"
+    if row.get("calc_folder") and job.get("total_steps"):
+        pr = solver_monitor.progress(row["calc_folder"])
+        short = health.run_incomplete(pr.get("steps_done") if pr.get("monitor_found") else None,
+                                      job["total_steps"], list(row.get("warnings") or []))
+        if short:
+            return f"RUN_INCOMPLETE: {short['message']}"
+    return None
+
+
+def _cases_rows(job: dict, rows: list[dict]) -> list[dict]:
+    """Worker rows with stopped cases re-labelled 'interrupted' (new dicts; the input is not changed)."""
+    out = []
+    for r in rows:
+        why = _case_interrupted(job, r)
+        out.append({**r, "state": "interrupted", "reason": why + ": partial results, re-run this case"} if why else r)
+    return out
 
 
 async def _run_cases_status(job: dict) -> dict:
@@ -2147,10 +2230,16 @@ async def _run_cases_status(job: dict) -> dict:
     prog = _read_progress(job)
     sel = prog.get("cases") or job.get("cases")
     done = prog.get("done") or []
+    if job["done"]:
+        res = (job.get("response") or {}).get("result") or ((job.get("response") or {}).get("error") or {}).get("data")
+        if isinstance(res, dict) and isinstance(res.get("cases"), list) and res["cases"] and "state" in res["cases"][0]:
+            done = res["cases"]           # the worker's final rows are authoritative
+        done = _cases_rows(job, done)
     if sel is not None:
         st["cases"] = sel
         st["cases_done"] = f"{len(done)}/{len(sel)}"
-    st["done"] = [{k: r.get(k) for k in ("case", "state", "seconds", "errors") if k in r} for r in done]
+    st["done"] = [{k: r.get(k) for k in ("case", "state", "seconds", "errors", "warnings", "reason") if k in r}
+                  for r in done]
     if not job["done"]:
         st["state"] = "running"
         st["current_case"] = prog.get("current_case")
@@ -2170,11 +2259,18 @@ async def _run_cases_status(job: dict) -> dict:
         st["ok"] = True
         return st
     resp = job["response"]
-    st["ok"] = bool(resp.get("ok"))
-    st["state"] = "finished" if resp.get("ok") else "failed"
+    interrupted = [r.get("case") for r in done if r.get("state") == "interrupted"]
+    st["interrupted"] = interrupted
+    st["ok"] = bool(resp.get("ok")) and not interrupted
+    st["state"] = "finished" if st["ok"] else "failed"
     st["run"] = resp
     st["hint"] = ("read case k with jmag_list_results(study, case=k) / jmag_get_result(study, table, case=k); "
                   "jmag_check(stage='post') checks the current case only")
+    if interrupted:
+        st["error"] = {"message": f"case(s) {interrupted} were stopped before the end (partial results)",
+                       "hint": f"do not use their results; solve them again with jmag_run_cases(study, "
+                               f"cases={interrupted}) once nothing is running"}
+        st["hint"] = st["error"]["hint"] + "; " + st["hint"]
     return st
 
 
@@ -2187,7 +2283,10 @@ async def jmag_run_cases(study: str, cases: list[int] | None = None, method: str
       cases_done, the current case and its step progress; jmag_cancel_run aborts the current case and starts no
       new ones. method='all_cases' (UNVERIFIED): activates exactly these cases and calls Study.RunAllCases once
       (no per-case progress). method='optimization' (UNVERIFIED): Study.RunOptimization for the table set with
-      jmag_optimization_table. Returns per-case state/seconds/solver errors when done.
+      jmag_optimization_table. Returns per-case state/seconds/solver errors/warnings when done.
+    Case states: finished, failed, skipped, cancelled (never started) and interrupted (stopped mid-solve: the case
+    solving at jmag_cancel_run, an interruption/abort message, or fewer jmonitor steps than configured; it keeps
+    partial results). Any interrupted case makes the final status ok=false with the cases=[...] to re-run.
     Budget: each case costs one full solve - estimate with one jmag_run first. Then read case k with
     jmag_get_result(study, table, case=k) or compare cases with jmag_compare.
     """

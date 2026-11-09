@@ -4,6 +4,7 @@ usage: python tests/live/mcp_client_flow.py <jmag_pid> <study>
 """
 import asyncio
 import json
+import os
 import sys
 
 from mcp import ClientSession
@@ -21,7 +22,7 @@ def show(name, res, limit=1200):
 
 
 async def main(pid: int, study: str) -> None:
-    params = StdioServerParameters(command=sys.executable, args=["-m", "jmag_bridge"])
+    params = StdioServerParameters(command=sys.executable, args=["-m", "jmag_bridge"], env=dict(os.environ))
     async with stdio_client(params) as (r, w):
         async with ClientSession(r, w) as s:
             await s.initialize()

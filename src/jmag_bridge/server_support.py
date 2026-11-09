@@ -196,7 +196,8 @@ def solver_status(job_folder: str | None = None,
     folders = [job_folder] if job_folder else []
     for p in procs:
         f = solver_monitor.folder_from_command(p.get("command", ""))
-        if f and f not in folders:
+        # the job folder (forward slashes) and the parsed one (OS separators) name the same folder: compare normalised
+        if f and solver_monitor._norm(f) not in {solver_monitor._norm(x) for x in folders}:
             folders.append(f)
     ages = []
     for f in folders:
@@ -253,9 +254,9 @@ def dq_estimate(kind: str, params: dict | None) -> dict:
                            "I = hypot(i_d, i_q), gamma = atan2(i_q, i_d)",
                 "assumptions": ["amplitude-invariant Park transform (same as jmag_experiment's dq helpers)",
                                 "d axis at theta_e from the phase-U axis, U-V-W positive sequence",
-                                "circuit_source assumes JMAG's 3-phase source is I sin(2 pi f t + PhaseU) with "
-                                "theta_e(t=0) = theta_e_deg - unverified live; check the current at t=0 in "
-                                "jmag_get_result"],
+                                "circuit_source: JMAG's 3-phase current source is I sin(2 pi f t + PhaseU) "
+                                "(verified on JMAG-Designer 23.0, 2026-11-09) with theta_e(t=0) = theta_e_deg; "
+                                "theta_e_deg = angle of the no-load flux-linkage vector at t = 0"],
                 "expected_fea_tolerance_pct": 0.0,
                 "details": {"phase_currents_A": {"U": a, "V": b, "W": c}, "amplitude_A": amp,
                             "current_angle_from_d_deg": gamma,

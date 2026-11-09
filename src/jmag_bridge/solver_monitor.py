@@ -79,8 +79,13 @@ def log_messages(folder: str | os.PathLike, statuses=("Warning", "Error")) -> li
     return out
 
 
-#: Solver executables: ExecSolver.exe <calc folder>/Designer.jcf starts jam.exe (the solver proper).
-SOLVER_EXES = ("ExecSolver.exe", "jam.exe")
+#: Solver executables, as seen on JMAG-Designer 23.0 (2026-11-09, 2D Transient with rotation): designer.exe starts
+#: jcwrap.exe "<console title>" <calc folder> "<install>/ExecSolver.exe" <calc folder>/Designer.jcf, which starts
+#: "<install>/ExecSolver.exe" <calc folder>/Designer.jcf (unquoted path, forward slashes, trailing space). Its
+#: children are the solver modules: mg2dnv.exe -rotation (2D mesh / rotation, first run of a study) and jam.exe
+#: (no arguments). jam.exe "100 . 0" was also seen under a short-lived parent. Only ExecSolver.exe and jcwrap.exe
+#: name the calc folder; killing the ExecSolver tree (taskkill /T) also ends mg2dnv / jam.
+SOLVER_EXES = ("ExecSolver.exe", "jam.exe", "mg2dnv.exe")
 
 # A .jcf argument: quoted, or an absolute drive/UNC path that may contain spaces (the match starts at the last
 # drive root before ".jcf", so an executable path earlier on the line is not swallowed), or a bare token.
@@ -145,7 +150,11 @@ def _norm(p: str) -> str:
     return str(p).replace("\\", "/").lower().rstrip("/")
 
 
-def kill_solver(folder: str | None = None) -> list[int]:
+def kill_solver(folder: str | None) -> list[int]:
+    """Terminate the ExecSolver trees working in `folder`. Refuses without a folder: solver_processes(None) is every
+    solver on the machine, including other JMAG instances' runs."""
+    if not folder:
+        raise ValueError("kill_solver needs the calc folder of the run to stop; refusing to kill every solver")
     killed = []
     for p in solver_processes(folder):
         subprocess.run(["taskkill", "/PID", str(p["pid"]), "/T", "/F"], capture_output=True,

@@ -400,6 +400,9 @@ KNOWN_MESSAGES = [
      "Newton-Raphson hit its iteration limit at some steps. If those steps are current zero-crossings (B~0) it is "
      "usually harmless; otherwise raise NonlinearMaxIteration, refine the mesh where B changes fast, reduce the "
      "time step, try the direct solver, and check the BH curve is monotonic."),
+    (r"interrupt(?:ion)? key \( ?ctrl ?\+ ?c ?\) (?:is|was|has been) pressed", "error", "RUN_INTERRUPTED",
+     "The solve was stopped (Abort in 'Run Analysis' / jmag_cancel_run; seen on 23.0 as a warning of a run that "
+     "still reports has_result): the results cover only the steps before the stop. Re-run for complete results."),
     ("negative or zero", "error", "NEGATIVE_ELEMENT_VOLUME",
      "Distorted elements, usually moving parts on a normal mesh. Rotating machines: mesh MeshType=1 (slide), "
      "AutoSlide=1, CircumferentialDivision so one step moves an integer number of elements, and make sure no user "
@@ -408,9 +411,10 @@ KNOWN_MESSAGES = [
 
 
 def classify_message(text: str, default_level: str) -> tuple[str, str, str]:
-    low = text.lower()
+    """KNOWN_MESSAGES patterns are lowercase regexes, matched on the lowercased text with whitespace collapsed."""
+    low = " ".join(text.lower().split())
     for pat, level, code, why in KNOWN_MESSAGES:
-        if pat in low:
+        if re.search(pat, low):
             return level, code, why
     return default_level, "SOLVER_" + default_level.upper(), ""
 
@@ -424,6 +428,32 @@ SOLVER_ABORT_PATTERNS = (
     r"\bfail(?:ed)? to execute\b",
     r"size of point array is zero",
 )
+#: A stopped (cancelled) solve: JMAG 23.0 reports it as a run *warning* and keeps the partial results
+#: ("The interruption key (Ctrl+C) is pressed. The program will be terminated.", measured 2026-11-09). Matched on
+#: the lowercased, whitespace-collapsed text; spacing around "Ctrl + C" and the tense ("was" / "has been pressed")
+#: are tolerated because only the one English wording was observed. worker/ops.py keeps a copy (_INTERRUPT_RE).
+SOLVER_INTERRUPT_PATTERNS = (r"interrupt(?:ion)? key \( ?ctrl ?\+ ?c ?\) (?:is|was|has been) pressed",)
+STEP_AUTO_UPDATED_PATTERN = r"step control has been automatically updated"
+
+
+def is_interrupt_message(text: str) -> bool:
+    flat = " ".join(str(text).lower().split())
+    return any(re.search(p, flat) for p in SOLVER_INTERRUPT_PATTERNS)
+
+
+def run_incomplete(steps_done: int | None, configured_steps: int | None, messages: Iterable[str] = ()) -> dict | None:
+    """Text-independent cross-check of a run reported finished: the solver's jmonitor counted fewer finished steps
+    than the study was set to. None when it cannot be judged: no count, or JMAG retimed the steps for the motion
+    (STEP_AUTO_UPDATED: the configured count is then no longer the total). Not verified live (a stopped run was
+    only ever recognised by its message)."""
+    if not steps_done or not configured_steps or steps_done >= int(configured_steps):
+        return None
+    if any(re.search(STEP_AUTO_UPDATED_PATTERN, " ".join(str(m).lower().split())) for m in messages):
+        return None
+    return _f("error", "RUN_INCOMPLETE",
+              f"the solver finished {steps_done} of {int(configured_steps)} steps (jmonitor) but the run was "
+              "reported finished",
+              "the solve was stopped or died early: results cover only the first steps; jmag_run it again")
 
 
 def solver_abort_messages(run_env: dict, log_entries: Iterable[dict] | None = None) -> list[str]:
@@ -431,18 +461,22 @@ def solver_abort_messages(run_env: dict, log_entries: Iterable[dict] | None = No
 
     Looks at the errors the run op collected (``result.errors`` or ``error.data.errors``), the JMAG messages logged
     during the run (``jmag_messages``) and the Error entries of the solver's Designer.log (``log_entries`` from
-    ``solver_monitor.log_messages``). Warnings are ignored.
+    ``solver_monitor.log_messages``). Warnings are ignored, except the interruption message of a stopped solve
+    (``SOLVER_INTERRUPT_PATTERNS``): its partial results are not a finished run.
     """
     texts: list[str] = []
+    warn: list[str] = []
     for part in (run_env.get("result"), (run_env.get("error") or {}).get("data")):
         if isinstance(part, dict):
             texts += [str(t) for t in part.get("errors") or []]
+            warn += [str(t) for t in part.get("warnings") or []]
     texts += [str(t) for t in run_env.get("jmag_messages") or []]
     texts += [str(e.get("text", "")) for e in log_entries or [] if e.get("status") == "Error"]
     out: list[str] = []
-    for t in texts:
+    for t, pats in [(t, SOLVER_ABORT_PATTERNS + SOLVER_INTERRUPT_PATTERNS) for t in texts] + \
+            [(t, SOLVER_INTERRUPT_PATTERNS) for t in warn]:
         flat = " ".join(t.split())
-        if flat not in out and any(re.search(p, flat.lower()) for p in SOLVER_ABORT_PATTERNS):
+        if flat not in out and any(re.search(p, flat.lower()) for p in pats):
             out.append(flat)
     return out
 
@@ -459,11 +493,17 @@ def _flat(ys: Sequence[float]) -> bool:
 
 def postflight(run_info: dict, convergence: dict | None = None, tables: dict | None = None,
                electrical_frequency_hz: float | None = None, configured_steps: int | None = None,
-               has_torque_condition: bool | None = None) -> list[dict]:
+               has_torque_condition: bool | None = None, steps_done: int | None = None) -> list[dict]:
     """run_info: has_result/errors/warnings; tables: {title: {"x": [...], "columns": {name: [...]}}}.
 
-    has_torque_condition: False skips TORQUE_ZERO (None = unknown: a torque table implies the condition)."""
+    has_torque_condition: False skips TORQUE_ZERO (None = unknown: a torque table implies the condition).
+    steps_done: finished steps counted in the solver's jmonitor (None = unknown) -> RUN_INCOMPLETE (run_incomplete)."""
     out: list[dict] = []
+    if run_info.get("has_result"):
+        short = run_incomplete(steps_done, configured_steps,
+                               list(run_info.get("warnings") or []) + list(run_info.get("errors") or []))
+        if short:
+            out.append(short)
     if configured_steps and tables:
         rows = max((len(tb.get("x", [])) for tb in tables.values()), default=0)
         if rows and rows != int(configured_steps):

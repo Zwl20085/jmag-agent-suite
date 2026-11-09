@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -35,7 +36,7 @@ async def main(work: Path, pid: int | None, skip_risky: bool) -> dict:
     work.mkdir(parents=True, exist_ok=True)
     meta = make_geometry.build(work)
     log: list[dict] = []
-    params = StdioServerParameters(command=sys.executable, args=["-m", "jmag_bridge"])
+    params = StdioServerParameters(command=sys.executable, args=["-m", "jmag_bridge"], env=dict(os.environ))
     async with stdio_client(params) as (r, w):
         async with ClientSession(r, w) as s:
             await s.initialize()

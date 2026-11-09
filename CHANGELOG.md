@@ -1,5 +1,65 @@
 # Changelog
 
+## 0.4.1 (2026-11-09)
+
+Live verification of the 0.4.0 "unverified live" items on JMAG-Designer 23.0 (examples/spm_motor, 12s/4p SPM,
+own instance, 2026-11-09); numbers in `docs/jmag-facts.md`.
+
+- Verified: `jmag_estimate(kind='dq_to_phase')` / `phase_to_dq`. JMAG's 3-phase current source is
+  `I sin(2 pi f t + PhaseU)` with U-V-W sequence (currents at t = 0: U -10, V +5, W +5 A for PhaseU -90); the iq-only
+  current at the no-load flux angle (90 deg) gives PhaseU -90 and the maximum torque 1.774 N m (1.536 N m at +-30
+  deg); `phase_to_dq` of the measured currents returns d 0, q 10.000 A. No code change; the "unverified live"
+  wording is gone from the docstrings and the skill.
+- Verified: the no-job cancel path (`jmag_cancel_run` after the bridge forgot its job) - Abort in the connected
+  pid's Run Analysis window, 'Yes, and open results', the solver ended by itself, Designer alive, 13 s; the
+  job-done refusal; `dialogs.ps1 -OwnerPid` (own pid listed, another pid nothing). The no-job answer drops
+  `unverified_live` and carries `owned: false`. The kill fallback was not needed and stays unverified.
+- Fix: a stopped solve came back `ok` with partial results and only the warning "The interruption key (Ctrl+C) is
+  pressed." It is now a known message, post-run code RUN_INTERRUPTED (error), and `health.solver_abort_messages`
+  reports it (also from run warnings, `SOLVER_INTERRUPT_PATTERNS`), so `jmag_run_status` says `solver_aborted` /
+  `ok: false`. `jmag_cancel_run`'s docstring no longer claims the study is left without results.
+- Fix: `solver_status` listed the job's calc folder twice (forward-slash job path and the parsed path with
+  backslashes); folders are compared normalised.
+- Solver processes measured: designer -> jcwrap.exe -> ExecSolver.exe "<install>/ExecSolver.exe" <calc
+  folder>/Designer.jcf (unquoted, trailing space) -> mg2dnv.exe -rotation / jam.exe. `SOLVER_EXES` adds
+  `mg2dnv.exe`; the captured command lines (paths anonymised) are `tests/fixtures/solver_cmdlines.txt`.
+- Settled facts: `jmag_list_parts` area is mm^2 (slot 139.27727 = analytic); the Run Analysis window has only
+  "Customize Monitor..." and "Abort" (no Cancel); monitor age during a 2D run 0.0-0.1 s. Still open (facts file):
+  the kill fallback, 3D monitor ages, `replay.py` with a second model, JMAG's own duplicate-name behaviour, and
+  meshing/importing from the runner worker (so `jmag_mesh` / `jmag_import_cad` keep no `wait_seconds`).
+- Fix: `examples/spm_motor/run_mcp.py` and the `tests/live` scripts pass `env=dict(os.environ)` to
+  `StdioServerParameters`, so `JMAG_BRIDGE_HOME` / `JMAG_HOME` reach the server (the MCP SDK otherwise starts it
+  with a reduced environment).
+- Fix (review): `jmag_run_cases` reported a case stopped by `jmag_cancel_run` (or carrying the interruption
+  warning) as `finished` with `ok: true`. The worker now marks such a case `interrupted` (interruption message in
+  its report, or the cancel file appeared while it was solving; after `RunAllCases` every case with results is
+  `interrupted` once the job was cancelled, since which one stopped is unknown) and lists `interrupted`; the server
+  re-checks each finished row (case solving at cancel, `solver_abort_messages`, jmonitor step count), sets `ok:
+  false` with the `cases=[...]` to re-run, and keeps `warnings` and `reason` in the `done` summary. Between cases the
+  progress file clears `current_case`, so a cancel there marks nothing.
+- Fix (review, pre-existing): an owned cancel whose calc folder was unknown (`jmag_run` when `calc_folder` failed, a
+  `jmag_run_cases` job before its first case) waited on and could `taskkill` every ExecSolver on the machine.
+  `_abort_protocol` now presses Abort only and reports "solver tree not killed" without a folder (a `jmag_run` job
+  retries the folder lookup first); `solver_monitor.kill_solver(None)` raises `ValueError`.
+- Fix (review): when no solver process matched the calc folder before Abort (already gone, or an 8.3 short path on
+  the command line - long-path resolution not attempted) the cancel steps say "no solver process matched ...; not
+  verified stopped". `jmag_cancel_run` adds `solver_stopped_verified` (owned and unowned) and a jmag_status hint when
+  it is false.
+- Fix (review): interruption matching is case-insensitive and tolerates "Ctrl + C" spacing and "was / has been
+  pressed" (`SOLVER_INTERRUPT_PATTERNS`, `KNOWN_MESSAGES` are regexes on whitespace-collapsed lowercase text; the
+  worker keeps a copy). Only the "is pressed" wording was observed; the variants are tolerance. New text-independent
+  post finding RUN_INCOMPLETE (error): a Transient run with results whose jmonitor counted fewer `*End_of_Step` than
+  the configured steps, skipped when JMAG reported STEP_AUTO_UPDATED (configured count no longer the total);
+  `jmag_run_status` sets `run_incomplete` / `ok: false`. Cross-checked offline (read-only) on 11 existing calc
+  folders from earlier JMAG work on the owner's machine (version not recorded): the 6 complete runs had jmonitor
+  `*End_of_Step` = report "number of step" (181 = 181), the 5 runs with the interruption message had 115-384 of 3011;
+  their Designer.log wording "The interruption key (Ctrl+C) is pressed at SigintLikeDefault()." matches the
+  pattern. **Not verified on a run of this bridge**, and a run whose steps JMAG reduced without the retiming
+  message would be flagged falsely.
+- Tests (review): the dq convention test also pins the 6 deg sample (U -9.945, V +4.068, W +5.877 A), which a U-W-V
+  sequence fails (at 90 deg V = W); `test_versions` checks the README badges, now 0.4.1.
+- Versions 0.4.1 (pyproject, `__init__`, plugin.json, README badges).
+
 ## 0.4.0 (2026-11-08)
 
 - New: fields outside JMAG (2D studies). `jmag_field_data` exports the field of one step as plain JSON

@@ -13,7 +13,7 @@ English | [简体中文](README.zh-CN.md)
 ![Platform](https://img.shields.io/badge/platform-Windows-0078D6)
 ![Tools](https://img.shields.io/badge/MCP%20tools-79-6f42c1)
 ![Skills](https://img.shields.io/badge/Claude%20skills-10-ff7b00)
-![Version](https://img.shields.io/badge/version-0.4.0-informational)
+![Version](https://img.shields.io/badge/version-0.4.1-informational)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 </div>

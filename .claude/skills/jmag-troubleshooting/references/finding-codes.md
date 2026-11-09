@@ -60,6 +60,7 @@ warnings for CHECK).
 |---|---|---|
 | NO_RESULT | error | the study has no results (failed or cancelled) |
 | STEPS_CHANGED | warning | result rows != configured steps (JMAG retimed motion, or the run stopped early) - use the returned time axis |
+| RUN_INCOMPLETE | error | Transient run with results whose solver `jmonitor` counts fewer finished steps than configured, and no STEP_AUTO_UPDATED message (then the configured count is not the total): the run stopped early even if no message says so. `jmag_run_status` sets `run_incomplete` / `ok: false`; `jmag_run_cases` marks such a case `interrupted`. Text-independent cross-check of RUN_INTERRUPTED, unverified live |
 | ITERATION_LIMIT | warning | steps where Newton hit `NonlinearMaxIteration` (listed) |
 | ZERO_CURRENT | warning / error | every column of a circuit-current table is identically zero: warning (expected for cogging / open-circuit runs), error when every flux-linkage table is zero too |
 | NON_FINITE | error | NaN or Inf in a result column |
@@ -77,6 +78,7 @@ warnings for CHECK).
 | "calculation area of the force condition or the torque condition was extended" | TORQUE_AREA_EXTENDED | info | torque integration widened into air; normal |
 | "leakage inductance of fem-coil is ignored" | LEAKAGE_L_IGNORED | info | zero/small leakage L skipped; normal unless intended |
 | "not converged" | NONLINEAR_NOT_CONVERGED | warning | Newton limit at some steps; harmless at current zero-crossings |
+| "interruption key (ctrl+c) is pressed" (case-insensitive; also "Ctrl + C", "was / has been pressed") | RUN_INTERRUPTED | error | the solve was stopped (Abort / `jmag_cancel_run`); results cover only the steps before the stop; `jmag_run_status` also sets `solver_aborted`, `jmag_run_cases` marks the case `interrupted` (message verified 23.0, 2026-11-09; the variants are tolerance, not observed) |
 | "negative or zero" | NEGATIVE_ELEMENT_VOLUME | error | distorted elements: moving parts on a normal mesh / part bridging rotor and stator |
 
 When a message arrives in the report's error list, the finding is raised at error level even if

@@ -307,3 +307,89 @@ def test_post_does_not_derive_fe_for_static(fake):
     fake.call = orig
     r = asyncio.run(server.jmag_check("Load", "post"))
     assert "FE_DERIVED" in {f["code"] for f in r["health"]["findings"]}
+
+
+# --------------------------------------------------------------------------- 0.4.1: command lines captured live
+
+FIXTURE_CMDLINES = __import__("pathlib").Path(__file__).parent / "fixtures" / "solver_cmdlines.txt"
+
+
+def test_captured_solver_command_lines():
+    """ExecSolver / mg2dnv / jam / jcwrap rows captured on JMAG-Designer 23.0 (2026-11-09), paths anonymised."""
+    text = FIXTURE_CMDLINES.read_text(encoding="utf-8")
+    rows = solver_monitor.parse_process_lines(text)
+    assert [r["name"] for r in rows] == ["ExecSolver.exe", "mg2dnv.exe", "jam.exe", "ExecSolver.exe", "jam.exe",
+                                         "jcwrap.exe"]
+    load = str(solver_monitor.Path("C:/work/live1/spm.jfiles/SPM~1/Load~1/Case1"))
+    assert solver_monitor.folder_from_command(rows[0]["command"]) == load        # unquoted, trailing space
+    assert solver_monitor.folder_from_command(rows[5]["command"]) == load        # jcwrap: the .jcf argument
+    assert [solver_monitor.folder_from_command(r["command"]) for r in rows[1:3]] == [None, None]  # no folder
+    own = solver_monitor.parse_process_lines(text, "C:/work/live1/spm.jfiles/SPM~1/Load~1/Case1")
+    assert [r["pid"] for r in own] == [70180, 68312]
+    assert sup.folder_in_project(load, "C:/work/live1/spm.jproj")
+    assert set(solver_monitor.SOLVER_EXES) == {"ExecSolver.exe", "jam.exe", "mg2dnv.exe"}
+
+
+def test_dq_to_phase_matches_the_live_spm_measurement():
+    """JMAG-Designer 23.0, 12s/4p SPM (examples/spm_motor), 2026-11-09: no-load flux vector at t=0 at 90 deg
+    electrical; id=0, iq=10 A gave PhaseU -90 deg (max torque 1.774 Nm, 1.536 Nm at +-30 deg) and JMAG's currents
+    at t=0 were U -10, V +5, W +5 A, which phase_to_dq maps back to d 0, q 10."""
+    r = sup.dq_estimate("dq_to_phase", {"id": 0.0, "iq": 10.0, "theta_e_deg": 90.0})["details"]
+    assert r["circuit_source"]["phase"] == pytest.approx(-90.0)
+    assert [r["phase_currents_A"][k] for k in "UVW"] == pytest.approx([-10.0, 5.0, 5.0])
+    back = sup.dq_estimate("phase_to_dq", {"abc": [-9.999999996294221, 5.000235792056419, 4.999764204229636],
+                                           "theta_e_deg": 89.99843972662615})["details"]
+    assert back["d"] == pytest.approx(0.0, abs=1e-3) and back["q"] == pytest.approx(10.0, rel=1e-6)
+    # At 90 deg V = W, so the samples above cannot tell U-V-W from U-W-V. One step later (6 deg) JMAG gave
+    # U -9.945, V +4.068, W +5.877 A (docs/jmag-facts.md): a swapped sequence fails here.
+    r6 = sup.dq_estimate("dq_to_phase", {"id": 0.0, "iq": 10.0, "theta_e_deg": 96.0})["details"]
+    assert [r6["phase_currents_A"][k] for k in "UVW"] == pytest.approx([-9.945, 4.068, 5.877], abs=1e-3)
+    back6 = sup.dq_estimate("phase_to_dq", {"abc": [-9.945, 4.068, 5.877], "theta_e_deg": 96.0})["details"]
+    assert back6["d"] == pytest.approx(0.0, abs=5e-3) and back6["q"] == pytest.approx(10.0, abs=5e-3)
+
+
+def test_solver_status_does_not_list_the_job_folder_twice():
+    """Live 2026-11-09: the job's folder (forward slashes) and the one parsed from ExecSolver's command line
+    (backslashes) were listed as two calc folders."""
+    job = "C:/work/live1/spm.jfiles/SPM~1/Long~6/Case1"
+    procs = [{"pid": 1, "name": "ExecSolver.exe",
+              "command": '"C:/Program Files/JMAG-Designer23.0/ExecSolver.exe" ' + job + "/Designer.jcf "},
+             {"pid": 2, "name": "jam.exe", "command": '"C:/Program Files/JMAG-Designer23.0/jam.exe" '}]
+    st = sup.solver_status(job, list_procs=lambda folder, names: procs, progress=lambda f: {"last_write_age_s": 0.1})
+    assert st["calc_folders"] == [job] and st["newest_monitor_age_s"] == 0.1 and st["stalled"] is False
+
+
+INTERRUPTED = "The interruption key (Ctrl+C) is pressed. \nThe program will be terminated."   # 23.0, 2026-11-09
+
+
+def test_stopped_run_is_not_a_finished_run(fake, monkeypatch):
+    """A run stopped with Abort + 'Yes, and open results' came back ok, has_result true, with this warning."""
+    assert health.solver_abort_messages({"ok": True, "result": {"has_result": True, "errors": [],
+                                                                "warnings": [INTERRUPTED]}})
+    assert health.solver_abort_messages({"ok": True, "result": {"warnings": ["Newton ... not converged"]}}) == []
+    codes = {f["code"]: f["level"] for f in health.postflight({"has_result": True, "warnings": [INTERRUPTED]})}
+    assert codes == {"RUN_INTERRUPTED": "error"}
+    monkeypatch.setattr(server.solver_monitor, "log_messages", lambda folder: [])
+    monkeypatch.setattr(server.solver_monitor, "convergence", lambda *a, **k: None)
+    fake.job = {"id": "r1", "study": "Load", "model": None, "started": time.time() - 5, "finished": time.time(),
+                "done": True, "folder": "calc", "freq": None,
+                "response": {"ok": True, "result": {"has_result": True, "errors": [], "warnings": [INTERRUPTED]}}}
+    st = asyncio.run(server.jmag_run_status())
+    assert st["ok"] is False and st["solver_aborted"] is True and "interruption key" in st["error"]["message"]
+    assert "RUN_INTERRUPTED" in {f["code"] for f in st["post"]["health"]["findings"]}
+
+
+def test_scripts_pass_the_environment_to_the_stdio_server():
+    """The MCP SDK starts a stdio server with a reduced environment unless env= is given, so JMAG_BRIDGE_HOME and
+    JMAG_HOME set by the caller were ignored (seen live 2026-11-09 with examples/spm_motor/run_mcp.py)."""
+    import ast
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    scripts = sorted([*root.glob("examples/**/*.py"), *root.glob("tests/live/*.py")])
+    calls = []
+    for f in scripts:
+        for node in ast.walk(ast.parse(f.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "StdioServerParameters":
+                calls.append((f.name, {k.arg for k in node.keywords}))
+    assert len(calls) >= 5
+    assert all("env" in kw for _, kw in calls), [n for n, kw in calls if "env" not in kw]
