@@ -50,6 +50,7 @@ or repeat the number to the user as unverified.
 | NO_RESULT | error | solve failed or was cancelled |
 | NEGATIVE_ELEMENT_VOLUME | error | moving parts on a normal mesh / part bridging rotor-stator -> slide mesh, suppress gap region |
 | RUN_INTERRUPTED | error | the solve was stopped (Abort / `jmag_cancel_run`): partial results only - re-run |
+| RUN_INCOMPLETE | error | jmonitor counted fewer steps than configured (no retiming message): stopped early - re-run |
 | SOLVER_ERROR / SOLVER_WARNING | error / warning | unknown message - read it |
 | NONLINEAR_NOT_CONVERGED, ITERATION_LIMIT | warning | see "convergence" below |
 | STEP_AUTO_UPDATED | info | JMAG retimed steps for motion - normal |

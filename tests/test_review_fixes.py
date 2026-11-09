@@ -340,6 +340,12 @@ def test_dq_to_phase_matches_the_live_spm_measurement():
     back = sup.dq_estimate("phase_to_dq", {"abc": [-9.999999996294221, 5.000235792056419, 4.999764204229636],
                                            "theta_e_deg": 89.99843972662615})["details"]
     assert back["d"] == pytest.approx(0.0, abs=1e-3) and back["q"] == pytest.approx(10.0, rel=1e-6)
+    # At 90 deg V = W, so the samples above cannot tell U-V-W from U-W-V. One step later (6 deg) JMAG gave
+    # U -9.945, V +4.068, W +5.877 A (docs/jmag-facts.md): a swapped sequence fails here.
+    r6 = sup.dq_estimate("dq_to_phase", {"id": 0.0, "iq": 10.0, "theta_e_deg": 96.0})["details"]
+    assert [r6["phase_currents_A"][k] for k in "UVW"] == pytest.approx([-9.945, 4.068, 5.877], abs=1e-3)
+    back6 = sup.dq_estimate("phase_to_dq", {"abc": [-9.945, 4.068, 5.877], "theta_e_deg": 96.0})["details"]
+    assert back6["d"] == pytest.approx(0.0, abs=5e-3) and back6["q"] == pytest.approx(10.0, abs=5e-3)
 
 
 def test_solver_status_does_not_list_the_job_folder_twice():

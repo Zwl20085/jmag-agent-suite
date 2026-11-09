@@ -150,7 +150,11 @@ def _norm(p: str) -> str:
     return str(p).replace("\\", "/").lower().rstrip("/")
 
 
-def kill_solver(folder: str | None = None) -> list[int]:
+def kill_solver(folder: str | None) -> list[int]:
+    """Terminate the ExecSolver trees working in `folder`. Refuses without a folder: solver_processes(None) is every
+    solver on the machine, including other JMAG instances' runs."""
+    if not folder:
+        raise ValueError("kill_solver needs the calc folder of the run to stop; refusing to kill every solver")
     killed = []
     for p in solver_processes(folder):
         subprocess.run(["taskkill", "/PID", str(p["pid"]), "/T", "/F"], capture_output=True,

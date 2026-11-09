@@ -30,7 +30,35 @@ own instance, 2026-11-09); numbers in `docs/jmag-facts.md`.
 - Fix: `examples/spm_motor/run_mcp.py` and the `tests/live` scripts pass `env=dict(os.environ)` to
   `StdioServerParameters`, so `JMAG_BRIDGE_HOME` / `JMAG_HOME` reach the server (the MCP SDK otherwise starts it
   with a reduced environment).
-- Versions 0.4.1 (pyproject, `__init__`, plugin.json).
+- Fix (review): `jmag_run_cases` reported a case stopped by `jmag_cancel_run` (or carrying the interruption
+  warning) as `finished` with `ok: true`. The worker now marks such a case `interrupted` (interruption message in
+  its report, or the cancel file appeared while it was solving; after `RunAllCases` every case with results is
+  `interrupted` once the job was cancelled, since which one stopped is unknown) and lists `interrupted`; the server
+  re-checks each finished row (case solving at cancel, `solver_abort_messages`, jmonitor step count), sets `ok:
+  false` with the `cases=[...]` to re-run, and keeps `warnings` and `reason` in the `done` summary. Between cases the
+  progress file clears `current_case`, so a cancel there marks nothing.
+- Fix (review, pre-existing): an owned cancel whose calc folder was unknown (`jmag_run` when `calc_folder` failed, a
+  `jmag_run_cases` job before its first case) waited on and could `taskkill` every ExecSolver on the machine.
+  `_abort_protocol` now presses Abort only and reports "solver tree not killed" without a folder (a `jmag_run` job
+  retries the folder lookup first); `solver_monitor.kill_solver(None)` raises `ValueError`.
+- Fix (review): when no solver process matched the calc folder before Abort (already gone, or an 8.3 short path on
+  the command line - long-path resolution not attempted) the cancel steps say "no solver process matched ...; not
+  verified stopped". `jmag_cancel_run` adds `solver_stopped_verified` (owned and unowned) and a jmag_status hint when
+  it is false.
+- Fix (review): interruption matching is case-insensitive and tolerates "Ctrl + C" spacing and "was / has been
+  pressed" (`SOLVER_INTERRUPT_PATTERNS`, `KNOWN_MESSAGES` are regexes on whitespace-collapsed lowercase text; the
+  worker keeps a copy). Only the "is pressed" wording was observed; the variants are tolerance. New text-independent
+  post finding RUN_INCOMPLETE (error): a Transient run with results whose jmonitor counted fewer `*End_of_Step` than
+  the configured steps, skipped when JMAG reported STEP_AUTO_UPDATED (configured count no longer the total);
+  `jmag_run_status` sets `run_incomplete` / `ok: false`. Cross-checked offline (read-only) on 11 existing calc
+  folders from earlier JMAG work on the owner's machine (version not recorded): the 6 complete runs had jmonitor
+  `*End_of_Step` = report "number of step" (181 = 181), the 5 runs with the interruption message had 115-384 of 3011;
+  their Designer.log wording "The interruption key (Ctrl+C) is pressed at SigintLikeDefault()." matches the
+  pattern. **Not verified on a run of this bridge**, and a run whose steps JMAG reduced without the retiming
+  message would be flagged falsely.
+- Tests (review): the dq convention test also pins the 6 deg sample (U -9.945, V +4.068, W +5.877 A), which a U-W-V
+  sequence fails (at 90 deg V = W); `test_versions` checks the README badges, now 0.4.1.
+- Versions 0.4.1 (pyproject, `__init__`, plugin.json, README badges).
 
 ## 0.4.0 (2026-11-08)
 
