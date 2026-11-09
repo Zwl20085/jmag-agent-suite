@@ -27,6 +27,9 @@ own instance, 2026-11-09); numbers in `docs/jmag-facts.md`.
   "Customize Monitor..." and "Abort" (no Cancel); monitor age during a 2D run 0.0-0.1 s. Still open (facts file):
   the kill fallback, 3D monitor ages, `replay.py` with a second model, JMAG's own duplicate-name behaviour, and
   meshing/importing from the runner worker (so `jmag_mesh` / `jmag_import_cad` keep no `wait_seconds`).
+- Fix: `examples/spm_motor/run_mcp.py` and the `tests/live` scripts pass `env=dict(os.environ)` to
+  `StdioServerParameters`, so `JMAG_BRIDGE_HOME` / `JMAG_HOME` reach the server (the MCP SDK otherwise starts it
+  with a reduced environment).
 - Versions 0.4.1 (pyproject, `__init__`, plugin.json).
 
 ## 0.4.0 (2026-11-08)

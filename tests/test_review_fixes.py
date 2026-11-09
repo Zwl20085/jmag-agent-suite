@@ -371,3 +371,19 @@ def test_stopped_run_is_not_a_finished_run(fake, monkeypatch):
     st = asyncio.run(server.jmag_run_status())
     assert st["ok"] is False and st["solver_aborted"] is True and "interruption key" in st["error"]["message"]
     assert "RUN_INTERRUPTED" in {f["code"] for f in st["post"]["health"]["findings"]}
+
+
+def test_scripts_pass_the_environment_to_the_stdio_server():
+    """The MCP SDK starts a stdio server with a reduced environment unless env= is given, so JMAG_BRIDGE_HOME and
+    JMAG_HOME set by the caller were ignored (seen live 2026-11-09 with examples/spm_motor/run_mcp.py)."""
+    import ast
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    scripts = sorted([*root.glob("examples/**/*.py"), *root.glob("tests/live/*.py")])
+    calls = []
+    for f in scripts:
+        for node in ast.walk(ast.parse(f.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "StdioServerParameters":
+                calls.append((f.name, {k.arg for k in node.keywords}))
+    assert len(calls) >= 5
+    assert all("env" in kw for _, kw in calls), [n for n, kw in calls if "env" not in kw]

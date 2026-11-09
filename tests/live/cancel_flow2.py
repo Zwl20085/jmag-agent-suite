@@ -1,11 +1,11 @@
 """Fresh JMAG -> open project -> long run -> cancel (keep partial) -> verify. usage: cancel_flow2.py <project.jproj> <study>"""
-import asyncio, json, sys
+import asyncio, json, os, sys
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
 
 async def main(project, study):
-    params = StdioServerParameters(command=sys.executable, args=["-m", "jmag_bridge"])
+    params = StdioServerParameters(command=sys.executable, args=["-m", "jmag_bridge"], env=dict(os.environ))
     async with stdio_client(params) as (r, w):
         async with ClientSession(r, w) as s:
             await s.initialize()

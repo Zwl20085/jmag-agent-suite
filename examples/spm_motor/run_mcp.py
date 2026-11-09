@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import math
 import sys
 from pathlib import Path
@@ -34,7 +35,7 @@ class Fail(RuntimeError):
 async def main(work: Path, pid: int | None, keep_open: bool) -> dict:
     meta = make_geometry.build(work)
     S = "Load"
-    params = StdioServerParameters(command=sys.executable, args=["-m", "jmag_bridge"])
+    params = StdioServerParameters(command=sys.executable, args=["-m", "jmag_bridge"], env=dict(os.environ))
     async with stdio_client(params) as (r, w):
         async with ClientSession(r, w) as s:
             await s.initialize()

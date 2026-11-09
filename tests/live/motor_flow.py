@@ -1,11 +1,11 @@
 """Run a prepared motor study over MCP and validate it. usage: motor_flow.py <pid> <study> <rpm> <f_e>"""
-import asyncio, json, sys
+import asyncio, json, os, sys
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
 
 async def main(pid, study, rpm, fe):
-    async with stdio_client(StdioServerParameters(command=sys.executable, args=["-m", "jmag_bridge"])) as (r, w):
+    async with stdio_client(StdioServerParameters(command=sys.executable, args=["-m", "jmag_bridge"], env=dict(os.environ))) as (r, w):
         async with ClientSession(r, w) as s:
             await s.initialize()
 
